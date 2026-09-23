@@ -19,7 +19,7 @@ set "PYTHON=%CD%\.venv\Scripts\python.exe"
 if exist "%PYTHON%" (
     "%PYTHON%" -c "import sys" >nul 2>&1
     if errorlevel 1 (
-        echo [NOTICE] Existing .venv has broken paths (likely transferred from another PC).
+        echo [NOTICE] Existing .venv has broken paths [likely transferred from another PC].
         echo Recreating clean virtual environment...
         rmdir /s /q .venv >nul 2>&1
     )
