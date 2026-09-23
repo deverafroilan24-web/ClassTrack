@@ -109,7 +109,24 @@ window.showTeacherLogin = function () {
   document.getElementById("guest-login-form").classList.add("hidden");
   document.getElementById("teacher-login-error").classList.add("hidden");
   document.getElementById("teacher-pin-input").focus();
+  loadAvailableTeacherKeys();
 };
+
+async function loadAvailableTeacherKeys() {
+  const list = document.getElementById("available-teacher-keys");
+  if (!list) return;
+  list.innerHTML = '<span class="col-span-2 text-slate-500">Loading teacher keys…</span>';
+  try {
+    const response = await originalFetch("/api/auth/teacher-keys", { cache: "no-store" });
+    if (!response.ok) throw new Error("Could not load teacher keys");
+    const teachers = await response.json();
+    list.innerHTML = teachers.length
+      ? teachers.map((teacher) => `<span>• ${escapeHtml(teacher.pin)} : ${escapeHtml(teacher.name)}</span>`).join("")
+      : '<span class="col-span-2 text-slate-500">No teacher keys have been added.</span>';
+  } catch (error) {
+    list.innerHTML = '<span class="col-span-2 text-rose-700">Could not load teacher keys. Check the server connection.</span>';
+  }
+}
 
 window.showGuestLogin = function () {
   document.getElementById("welcome-portal").classList.remove("hidden");

@@ -286,6 +286,14 @@ class DatabaseManager:
             rows = conn.execute("SELECT id, name, department, is_active, created_at FROM teachers ORDER BY name").fetchall()
             return [dict(row) for row in rows]
 
+    def get_available_teacher_keys(self) -> List[Dict[str, str]]:
+        """Return active teacher names and PINs for the login help list."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT name, pin FROM teachers WHERE is_active = 1 AND pin IS NOT NULL AND pin <> '' ORDER BY name"
+            ).fetchall()
+            return [{"name": row["name"], "pin": row["pin"]} for row in rows]
+
     def get_teacher_by_pin(self, pin: str) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT id, name, department, pin, pin_hash, auth_version FROM teachers WHERE is_active = 1").fetchall()

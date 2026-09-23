@@ -558,11 +558,8 @@
         <input id="teacher-pin-input" type="password" inputmode="numeric" autocomplete="off" required class="w-full rounded-lg border border-slate-300 px-4 py-3 text-lg tracking-widest focus:outline-none focus:ring-2 focus:ring-brand-700" placeholder="Enter your key">
         <div class="rounded-lg bg-slate-50 border border-slate-200 p-2.5 text-xs text-slate-600">
           <p class="font-semibold text-slate-700 mb-1">Available Teacher Keys:</p>
-          <div class="grid grid-cols-2 gap-1 text-[11px] font-mono">
-            <span>• 1234 : Froilan</span>
-            <span>• 4321 : Leonard</span>
-            <span>• 1111 : Santos</span>
-            <span>• 2222 : Garcia</span>
+          <div id="available-teacher-keys" class="grid grid-cols-2 gap-1 text-[11px] font-mono">
+            <span class="col-span-2 text-slate-500">Loading teacher keys…</span>
           </div>
         </div>
         <p id="teacher-login-error" role="alert" class="hidden text-sm font-medium text-rose-700"></p>

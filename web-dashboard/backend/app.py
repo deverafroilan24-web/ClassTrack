@@ -309,7 +309,7 @@ async def enforce_teacher_access(request: Request, call_next):
         return JSONResponse({"detail": "Teacher authentication required"}, status_code=401)
     if path.startswith("/api/"):
         guest_get = {"/api/sections", "/api/sessions/active", "/api/recitation/ledger"}
-        public_get = {"/api/edge/status", "/api/auth/guest-session"}
+        public_get = {"/api/edge/status", "/api/auth/guest-session", "/api/auth/teacher-keys"}
         public_post = {"/api/auth/verify-pin", "/api/auth/guest", "/api/events/ingest"}
         if method == "POST" and path == "/api/events/ingest":
             if not _validate_edge_key(request.headers.get("x-edge-key", "")):
@@ -384,6 +384,11 @@ async def get_auth_session(x_teacher_token: Optional[str] = Header(default=None)
         "teacher_name": payload.get("teacher_name", "Instructor"),
         "is_admin": payload.get("is_admin", False)
     }
+
+
+@app.get("/api/auth/teacher-keys")
+async def get_available_teacher_keys():
+    return db.get_available_teacher_keys()
 
 
 @app.middleware("http")
