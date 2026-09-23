@@ -268,6 +268,21 @@ class CameraNodeApp:
             seats_data = self.api_client.fetch_seats(section_id)
             if seats_data is None:
                 return
+            # Keep the active session unset until at least one seat arrives.
+            # The periodic sync loop retries while worker.session_id differs
+            # from the active session, which recovers from an initially empty
+            # response or a section roster that is still loading.
+            with self._section_lock:
+                active_session_id = self._active_session_id
+                if section_id != self.section_id:
+                    self._trigger_sync("RELOAD_SEATS")
+                    return
+                if active_session_id and not seats_data:
+                    print(
+                        f"[CameraNode] No seats returned for active section {section_id}; "
+                        "will retry seat sync."
+                    )
+                    return
             zones = [
                 SeatZone(
                     id=s["id"],
@@ -292,7 +307,7 @@ class CameraNodeApp:
                     self._trigger_sync("RELOAD_SEATS")
                     return
                 self.vision_worker.set_seats(zones)
-                self.vision_worker.set_session_id(self._active_session_id)
+                self.vision_worker.set_session_id(active_session_id)
             print(f"[CameraNode] Loaded {len(zones)} seat zone(s) for section {section_id}")
         except Exception as e:
             print(f"[CameraNode] Could not load seats: {e}")

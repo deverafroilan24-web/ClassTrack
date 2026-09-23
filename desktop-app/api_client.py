@@ -79,21 +79,27 @@ class DashboardAPIClient:
 
     def fetch_seats(self, section_id: str = "") -> Optional[List[Dict[str, Any]]]:
         """GET /api/seats?section_id=..."""
-        try:
-            params = {}
-            if section_id:
-                params["section_id"] = section_id
-            resp = requests.get(
-                f"{self.base_url}/api/seats",
-                params=params,
-                headers=self._headers(),
-                timeout=5,
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            print(f"[APIClient] Failed to fetch seats: {e}")
-            return None
+        params = {"section_id": section_id} if section_id else {}
+        last_error = None
+        # Render may briefly take several seconds to wake or answer REST calls.
+        # Retry transient failures so a single timeout does not leave the camera
+        # without its section roster for the remainder of the session.
+        for attempt in range(3):
+            try:
+                resp = requests.get(
+                    f"{self.base_url}/api/seats",
+                    params=params,
+                    headers=self._headers(),
+                    timeout=(5, 15),
+                )
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as e:
+                last_error = e
+                if attempt < 2:
+                    time.sleep(1.0 * (attempt + 1))
+        print(f"[APIClient] Failed to fetch seats after retries: {last_error}")
+        return None
 
     def fetch_active_session(self) -> Optional[Dict[str, Any]]:
         """GET /api/sessions/active"""
