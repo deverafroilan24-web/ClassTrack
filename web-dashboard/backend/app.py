@@ -66,6 +66,7 @@ pin_attempts: Dict[str, tuple[int, float]] = {}
 event_subscribers: Dict[WebSocket, Optional[str]] = {}
 event_teacher_ids: Dict[WebSocket, str] = {}
 edge_subscribers: Set[WebSocket] = set()
+edge_selected_section_id: Optional[str] = None
 
 
 def _teacher_id_from_token(token: Optional[str]) -> Optional[str]:
@@ -238,6 +239,10 @@ class PinRequest(BaseModel):
 
 class GuestCodeRequest(BaseModel):
     code: str = Field(min_length=1, max_length=32)
+
+
+class EdgeSectionSelectRequest(BaseModel):
+    section_id: str = Field(min_length=1, max_length=128)
 
 
 class TeacherCreateRequest(BaseModel):
@@ -524,6 +529,20 @@ async def get_sections(x_teacher_token: Optional[str] = Header(default=None),
     if active and active.get("section_id"):
         return [section for section in db.get_sections() if section["id"] == active["section_id"]]
     return []
+
+
+@app.post("/api/edge/section")
+async def select_camera_section(body: EdgeSectionSelectRequest,
+                                x_teacher_token: Optional[str] = Header(default=None)):
+    """Tell connected camera nodes which teacher-owned roster to track before class starts."""
+    _enforce_owned_section(body.section_id, x_teacher_token)
+    active = db.get_active_session()
+    if active and active.get("section_id") != body.section_id:
+        raise HTTPException(status_code=409, detail="End the active session before changing the camera section")
+    global edge_selected_section_id
+    edge_selected_section_id = body.section_id
+    await ConnectionManager.broadcast_to_edge({"type": "SECTION_SELECTED", "section_id": body.section_id})
+    return {"status": "ok", "section_id": body.section_id}
 
 
 @app.post("/api/sections", response_model=SectionResponse, status_code=status.HTTP_201_CREATED)
@@ -938,7 +957,7 @@ async def get_seats(section_id: Optional[str] = None,
         return db.get_seats(section_id=section_id, teacher_id=teacher_id)
     if _validate_edge_key(x_edge_key or ""):
         active = db.get_active_session()
-        section_id = active.get("section_id") if active else None
+        section_id = active.get("section_id") if active else section_id
         return db.get_seats(section_id=section_id) if section_id else []
     return []
 
@@ -1368,6 +1387,7 @@ async def ws_edge(websocket: WebSocket):
         await websocket.send_text(json.dumps({
             "type": "EDGE_INIT",
             "active_session": active_session,
+            "selected_section_id": active_session.get("section_id") if active_session else edge_selected_section_id,
             "sections": db.get_sections(),
             "camera_settings": camera_settings,
         }))

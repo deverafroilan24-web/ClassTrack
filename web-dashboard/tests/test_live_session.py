@@ -21,6 +21,7 @@ def live_class(tmp_path, monkeypatch):
     database = DatabaseManager(str(tmp_path / "classtrack-test.db"))
     monkeypatch.setattr(dashboard, "db", database)
     monkeypatch.setattr(dashboard, "EDGE_API_KEY", "test-edge-key")
+    dashboard.edge_selected_section_id = None
     dashboard.podium_queue.clear()
     section = database.create_section("Test class", "Testing", "Room 1", teacher_id="teacher_master")
     seat = database.register_student(section["id"], "Student One", "S001")
@@ -215,3 +216,39 @@ def test_student_registration_notifies_connected_camera(live_class):
         )
         assert registered.status_code == 200
         assert socket.receive_json()["type"] == "SEATS_UPDATED"
+
+
+def test_camera_can_load_selected_roster_before_session(live_class):
+    client, database, section, student, token, session = live_class
+    desk = database.configure_seating_grid(section["id"], 1, 1)[0]
+    student_id = database.get_students(section["id"])[0]["id"]
+    assigned = database.assign_student_to_seat(desk["id"], student_id)
+    stopped = client.post("/api/sessions/stop", headers={"X-Teacher-Token": token})
+    assert stopped.status_code == 200
+
+    response = client.get(
+        f"/api/seats?section_id={section['id']}", headers={"X-Edge-Key": "test-edge-key"}
+    )
+    assert response.status_code == 200
+    assert response.json()[0]["id"] == assigned["id"]
+    assert response.json()[0]["student_id"] == student_id
+
+
+def test_teacher_section_selection_notifies_camera_nodes(live_class, monkeypatch):
+    client, database, section, student, token, session = live_class
+    messages = []
+
+    async def capture(message):
+        messages.append(message)
+
+    monkeypatch.setattr(dashboard.ConnectionManager, "broadcast_to_edge", capture)
+    response = client.post(
+        "/api/edge/section",
+        json={"section_id": section["id"]},
+        headers={"X-Teacher-Token": token},
+    )
+    assert response.status_code == 200
+    assert messages == [{"type": "SECTION_SELECTED", "section_id": section["id"]}]
+    with client.websocket_connect("/ws/edge", headers={"X-Edge-Key": "test-edge-key"}) as socket:
+        init = socket.receive_json()
+        assert init["selected_section_id"] == section["id"]

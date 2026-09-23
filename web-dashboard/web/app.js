@@ -40,6 +40,9 @@ let draggedStudentId = null;
 let draggedFromSeatId = null;
 let activeSession = null;
 let currentLedger = [];
+let renderedLedgerSnapshot = "";
+let renderedLedgerSessionId = null;
+let renderedLedgerSectionId = null;
 let currentPodiumList = [];
 let teacherToken = sessionStorage.getItem("classtrack.teacherToken") || "";
 let teacherName = sessionStorage.getItem("classtrack.teacherName") || "";
@@ -59,6 +62,12 @@ const manualAwardsInProgress = new Set();
 let seatDataLoadingFor = "";
 let eventsSocket = null;
 let socketReconnectTimer = null;
+
+function invalidateLedgerRenderSnapshot() {
+  renderedLedgerSnapshot = "";
+  renderedLedgerSessionId = null;
+  renderedLedgerSectionId = null;
+}
 
 const originalFetch = window.fetch.bind(window);
 window.fetch = function (input, options = {}) {
@@ -164,6 +173,7 @@ window.enterGuestMode = function () {
   currentSeats = [];
   currentStudents = [];
   currentLedger = [];
+  invalidateLedgerRenderSnapshot();
   currentHeatmapData = null;
   seatingViewMode = "seating";
   sessionsHistoryList = [];
@@ -255,6 +265,7 @@ async function loadAuthorizedData() {
   activeSession = activeResponse.ok ? await activeResponse.json() : null;
   if (activeSession?.section_id) currentSectionId = activeSession.section_id;
   await fetchSections();
+  if (role === "teacher" && currentSectionId) await syncCameraSection(currentSectionId);
   await Promise.all(role === "teacher" ? [fetchSeats(), fetchRecitationLedger()] : [fetchRecitationLedger()]);
   updateSessionUI();
   if (role === "teacher") fetchSessionsHistory();
@@ -723,10 +734,12 @@ async function selectClassSection(sectionId) {
     return;
   }
   currentSectionId = sectionId;
+  if (role === "teacher") await syncCameraSection(sectionId);
   currentReportsSectionId = sectionId;
   currentSeats = [];
   currentStudents = [];
   currentLedger = [];
+  invalidateLedgerRenderSnapshot();
   if (sectionSelect) sectionSelect.value = sectionId;
   const seatingSectionSelect = document.getElementById("seating-section-select");
   if (seatingSectionSelect) seatingSectionSelect.value = sectionId;
@@ -738,6 +751,23 @@ async function selectClassSection(sectionId) {
   renderSectionRoster();
   renderRecitationLedger();
   await Promise.all([fetchSeats(), fetchRecitationLedger()]);
+}
+
+async function syncCameraSection(sectionId) {
+  if (role !== "teacher" || !sectionId) return;
+  try {
+    const response = await fetch("/api/edge/section", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ section_id: sectionId }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || "Camera section sync failed");
+    }
+  } catch (error) {
+    console.warn("Could not sync selected section to Camera Node:", error);
+  }
 }
 
 window.onReportsSectionChange = function (e) {
@@ -1099,7 +1129,12 @@ async function fetchRecitationLedger() {
       sectionId !== (activeSession?.section_id || currentSectionId) ||
       sessionId !== (activeSession?.id || "")
     ) return;
+    const snapshot = JSON.stringify(ledger);
+    if (snapshot === renderedLedgerSnapshot && sessionId === renderedLedgerSessionId && sectionId === renderedLedgerSectionId) return;
     currentLedger = ledger;
+    renderedLedgerSnapshot = snapshot;
+    renderedLedgerSessionId = sessionId;
+    renderedLedgerSectionId = sectionId;
     renderRecitationLedger();
   } catch (err) {
     console.error("Failed to load recitation ledger:", err);
@@ -1123,7 +1158,7 @@ function renderRecitationLedger() {
     return;
   }
 
-  currentLedger.forEach((student, idx) => {
+  currentLedger.forEach((student) => {
     const isDoubleHand = student.latest_reason_code === "ERR_DOUBLE_HAND_RAISE";
     const isSeatMismatch = student.verification_status === "SEAT_MISMATCH";
     const isRaised = student.latest_status === "VALID" && !isDoubleHand;
@@ -1199,7 +1234,7 @@ function renderRecitationLedger() {
     const avatarHtml = `<div class="w-6 h-6 rounded-full ${color.bg} ${color.text} font-bold text-[10px] flex items-center justify-center shrink-0 border ${color.border}">${initials}</div>`;
 
     const tr = document.createElement("tr");
-    tr.className = `transition-all duration-300 ease-out ${
+    tr.className = `${
       !activeSession
         ? "hover:bg-slate-50"
         : isSeatMismatch
@@ -1210,9 +1245,6 @@ function renderRecitationLedger() {
         ? "bg-emerald-50/50"
         : "hover:bg-slate-50"
     }`;
-    // Smooth fade-in animation
-    tr.style.opacity = "0";
-    tr.style.transform = "translateY(4px)";
     tr.innerHTML = `
       <td class="px-2.5 py-2">${podiumBadge}</td>
       <td class="px-2.5 py-2">
@@ -1232,14 +1264,6 @@ function renderRecitationLedger() {
     labelResponsiveCells(tr, ["Queue", "Student", "Status", "Raises", "Points", "Action"]);
     recitationTbody.appendChild(tr);
 
-    // Staggered smooth fade-in
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        tr.style.transition = "opacity 0.3s ease, transform 0.3s ease";
-        tr.style.opacity = "1";
-        tr.style.transform = "translateY(0)";
-      }, idx * 30);
-    });
   });
 }
 
@@ -2790,6 +2814,7 @@ function handleSocketMessage(msg) {
           currentSectionId = activeSession.section_id;
           currentReportsSectionId = currentSectionId;
           currentLedger = [];
+          invalidateLedgerRenderSnapshot();
           populateSectionDropdown();
           renderSectionsCards();
           updateSectionUI();

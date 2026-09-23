@@ -119,6 +119,7 @@ class CameraNodeApp:
         msg_type = msg.get("type", "")
         if msg_type == "EDGE_INIT":
             active = msg.get("active_session")
+            selected_section_id = msg.get("selected_section_id")
             incoming = msg.get("sections", [])
             with self._section_lock:
                 if incoming:
@@ -128,6 +129,8 @@ class CameraNodeApp:
             if incoming:
                 print(f"[CameraNode] Synced {len(self.sections)} section(s) via WebSocket. Active: {sec_name}")
             self._set_active_session(active)
+            if not active and selected_section_id:
+                self._set_camera_section(selected_section_id)
             if incoming:
                 self._trigger_sync("RELOAD_SEATS")
             # Apply initial camera settings if present
@@ -141,11 +144,31 @@ class CameraNodeApp:
             self._trigger_sync("RELOAD_SEATS")
         elif msg_type == "SECTIONS_UPDATED":
             self._trigger_sync("RELOAD_ALL")
+        elif msg_type == "SECTION_SELECTED":
+            self._set_camera_section(msg.get("section_id"))
         elif msg_type == "SESSION_STARTED":
             self._set_active_session({"id": msg.get("session_id"), "section_id": msg.get("section_id")})
         elif msg_type == "SESSION_STOPPED":
             self._set_active_session(None)
             print("[CameraNode] Session stopped remotely.")
+
+    def _set_camera_section(self, section_id: Optional[str]):
+        """Load the teacher's roster as soon as they sign in, before a session starts."""
+        if not section_id:
+            return
+        with self._section_lock:
+            if self._active_session_id and section_id != self.section_id:
+                return
+            changed = section_id != self.section_id
+            self.section_id = section_id
+            self._match_section_index()
+            selected = self.section_id
+            if changed:
+                self.vision_worker.set_session_id(None)
+                self.vision_worker.set_seats([])
+        if changed:
+            print(f"[CameraNode] Teacher selected section {selected}; loading student roster for standby detection.")
+        self._trigger_sync("RELOAD_SEATS")
 
     def _section_name(self) -> str:
         return next((s.get("name", self.section_id) for s in self.sections
@@ -165,7 +188,8 @@ class CameraNodeApp:
         session_id = active.get("id") if active else None
         section_id = active.get("section_id") if active else None
         with self._section_lock:
-            changed = session_id != self._active_session_id or (section_id and section_id != self.section_id)
+            section_changed = bool(section_id and section_id != self.section_id)
+            changed = session_id != self._active_session_id or section_changed
             self._active_session_id = session_id
             if section_id:
                 self.section_id = section_id
@@ -173,7 +197,7 @@ class CameraNodeApp:
             self.api_client.session_id = session_id
             if changed or not session_id:
                 self.vision_worker.set_session_id(None)
-                if session_id:
+                if section_changed:
                     self.vision_worker.set_seats([])
             selected = self.section_id
         if session_id:
