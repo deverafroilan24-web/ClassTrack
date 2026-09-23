@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClassTrack — Quick Start Guide</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: rgba(22, 30, 49, 0.85);
+      --card-border: rgba(59, 130, 246, 0.2);
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --accent-glow: rgba(59, 130, 246, 0.35);
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --success: #10b981;
+      --warning: #f59e0b;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    body {
+      background: radial-gradient(circle at top, #1e293b, var(--bg));
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+    }
+    .container {
+      max-width: 860px;
+      width: 100%;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 36px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 6px 14px;
+      background: rgba(59, 130, 246, 0.15);
+      border: 1px solid var(--accent);
+      border-radius: 9999px;
+      color: #60a5fa;
+      font-size: 0.85rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 14px;
+    }
+    h1 {
+      font-size: 2.4rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+      background: linear-gradient(135deg, #ffffff 40%, #93c5fd);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .subtitle {
+      color: var(--text-muted);
+      font-size: 1.1rem;
+      line-height: 1.5;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 24px;
+      margin-bottom: 32px;
+    }
+    @media (min-width: 768px) {
+      .grid {
+        grid-template-columns: 1fr 1fr;
+      }
+      .grid .full-width {
+        grid-column: span 2;
+      }
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 28px;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      overflow: hidden;
+    }
+    .card.primary {
+      border-color: rgba(59, 130, 246, 0.4);
+      background: linear-gradient(180deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.95) 100%);
+    }
+    .card-tag {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #93c5fd;
+      margin-bottom: 8px;
+    }
+    .card h2 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card p {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+      line-height: 1.5;
+      margin-bottom: 20px;
+    }
+    .steps {
+      list-style: none;
+      margin-bottom: 24px;
+      flex-grow: 1;
+    }
+    .steps li {
+      position: relative;
+      padding-left: 28px;
+      margin-bottom: 12px;
+      font-size: 0.92rem;
+      line-height: 1.4;
+      color: #e2e8f0;
+    }
+    .steps li::before {
+      content: attr(data-step);
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 18px;
+      height: 18px;
+      background: rgba(59, 130, 246, 0.2);
+      border: 1px solid var(--accent);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.7rem;
+      font-weight: 700;
+      color: #93c5fd;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 12px 20px;
+      border-radius: 10px;
+      font-weight: 600;
+      font-size: 0.95rem;
+      text-decoration: none;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      width: 100%;
+      text-align: center;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+      box-shadow: 0 4px 14px var(--accent-glow);
+    }
+    .btn-primary:hover {
+      background: var(--accent-hover);
+      transform: translateY(-1px);
+    }
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.08);
+      color: #e2e8f0;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.14);
+      transform: translateY(-1px);
+    }
+    .note-box {
+      background: rgba(245, 158, 11, 0.1);
+      border-left: 3px solid var(--warning);
+      padding: 12px 16px;
+      border-radius: 0 8px 8px 0;
+      margin-top: 14px;
+      font-size: 0.85rem;
+      color: #fcd34d;
+      line-height: 1.4;
+    }
+    .faq-section {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 28px;
+      margin-top: 10px;
+    }
+    .faq-section h3 {
+      font-size: 1.2rem;
+      margin-bottom: 16px;
+      color: #93c5fd;
+    }
+    .faq-item {
+      margin-bottom: 16px;
+    }
+    .faq-item:last-child {
+      margin-bottom: 0;
+    }
+    .faq-q {
+      font-weight: 600;
+      color: #f1f5f9;
+      font-size: 0.95rem;
+      margin-bottom: 4px;
+    }
+    .faq-a {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }
+    footer {
+      margin-top: 40px;
+      text-align: center;
+      color: #64748b;
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="badge">Plug &amp; Play System</div>
+      <h1>ClassTrack Quick Start</h1>
+      <p class="subtitle">Automated AI Classroom Participation &amp; Recitation Tracking</p>
+    </header>
+
+    <div class="grid">
+      <!-- Card 1: Web Dashboard -->
+      <div class="card primary">
+        <div class="card-tag">Cloud Web Application</div>
+        <h2>🌐 1. Teacher Dashboard</h2>
+        <p>No downloads or software installation required! Works on any phone, tablet, iPad, or computer browser.</p>
+        
+        <ul class="steps">
+          <li data-step="1">Open the cloud link in Chrome, Safari, or Edge.</li>
+          <li data-step="2">Select your class section (e.g., <strong>BSIT-3</strong>).</li>
+          <li data-step="3">Click <strong>"Start Class Session"</strong> to begin recitation monitoring.</li>
+          <li data-step="4">Tap <strong>"+1 Point"</strong> when students answer, or <strong>"End Session"</strong> to export CSV grades.</li>
+        </ul>
+
+        <a href="https://classtrack-mm41.onrender.com" target="_blank" class="btn btn-primary">
+          Open Live Web Dashboard &rarr;
+        </a>
+      </div>
+
+      <!-- Card 2: Desktop Camera App -->
+      <div class="card primary">
+        <div class="card-tag">Windows Desktop App</div>
+        <h2>📷 2. Classroom Camera</h2>
+        <p>Runs YOLOv11 pose detection on the classroom PC and automatically sends raised hands to the live dashboard.</p>
+        
+        <ul class="steps">
+          <li data-step="1">Locate and double-click <strong>ClassTrack_Setup_v1.0.exe</strong>.</li>
+          <li data-step="2">Click <strong>Next &rarr; Install</strong> (no Python or coding needed).</li>
+          <li data-step="3">Launch <strong>ClassTrack</strong> from your Windows Desktop.</li>
+          <li data-step="4">The camera window will open with real-time pose HUD overlay!</li>
+        </ul>
+
+        <a href="dist/installer/ClassTrack_Setup_v1.0.exe" class="btn btn-secondary">
+          Run ClassTrack Setup (.exe)
+        </a>
+
+        <div class="note-box">
+          ⚠️ <strong>Windows SmartScreen notice:</strong> If Windows shows <em>"Windows protected your PC"</em>, simply click <strong>"More info"</strong> &rarr; <strong>"Run anyway"</strong>.
+        </div>
+      </div>
+
+      <!-- Full Width: Controls & Info -->
+      <div class="card full-width">
+        <div class="card-tag">Operation Guide</div>
+        <h2>⌨️ Camera Controls &amp; Shortcuts</h2>
+        <p>When the camera window is running, you can use these single-key shortcuts:</p>
+        
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 10px;">
+          <div style="background: rgba(255,255,255,0.05); padding: 12px; border-radius: 8px;">
+            <strong style="color: #60a5fa;">[ Q ]</strong> Quit / Exit Camera
+          </div>
+          <div style="background: rgba(255,255,255,0.05); padding: 12px; border-radius: 8px;">
+            <strong style="color: #60a5fa;">[ C ]</strong> Cycle Next Section
+          </div>
+          <div style="background: rgba(255,255,255,0.05); padding: 12px; border-radius: 8px;">
+            <strong style="color: #60a5fa;">[ S ]</strong> Sync Desk Layouts
+          </div>
+          <div style="background: rgba(255,255,255,0.05); padding: 12px; border-radius: 8px;">
+            <strong style="color: #60a5fa;">[ R ]</strong> Full Remote Refresh
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- FAQ Section -->
+    <div class="faq-section">
+      <h3>Frequently Asked Questions</h3>
+      
+      <div class="faq-item">
+        <div class="faq-q">Do non-technical users need to install Python?</div>
+        <div class="faq-a">No! The installer (<code>ClassTrack_Setup_v1.0.exe</code>) bundles Python, PyTorch, YOLOv11, OpenCV, and AI model weights. Everything is 100% self-contained.</div>
+      </div>
+
+      <div class="faq-item">
+        <div class="faq-q">Can teachers access the dashboard from their smartphone?</div>
+        <div class="faq-a">Yes! Simply open <a href="https://classtrack-mm41.onrender.com" target="_blank" style="color: #60a5fa;">https://classtrack-mm41.onrender.com</a> on your iPhone, Android, iPad, or laptop. No downloads necessary.</div>
+      </div>
+
+      <div class="faq-item">
+        <div class="faq-q">How do I test hand tracking at home?</div>
+        <div class="faq-a">1. Open the Web Dashboard on your browser and click "Start Class Session".<br>2. Launch the Desktop Camera app and point your webcam at yourself.<br>3. Raise your hand high — the camera HUD turns green, and your seat immediately pops up at the top of the recitation queue on the web dashboard!</div>
+      </div>
+    </div>
+
+    <footer>
+      ClassTrack — Edge-to-Cloud Automated Classroom Monitoring &copy; 2026
+    </footer>
+  </div>
+</body>
+</html>

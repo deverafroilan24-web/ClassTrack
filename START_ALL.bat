@@ -2,6 +2,17 @@
 setlocal
 cd /d "%~dp0"
 
+:: Check if running from inside an unextracted zip
+echo "%~dp0" | findstr /i "Temp" >nul
+if not errorlevel 1 (
+    echo ============================================================
+    echo [ERROR] You are running directly from inside a ZIP file!
+    echo Please EXTRACT all files into a regular folder first.
+    echo ============================================================
+    pause
+    exit /b 1
+)
+
 echo ============================================================
 echo   ClassTrack - Starting Web Dashboard and Desktop App
 echo ============================================================

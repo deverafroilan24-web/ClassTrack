@@ -14,10 +14,28 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 import time
 import threading
+from pathlib import Path
 from typing import List, Optional
+
+# When packaged with PyInstaller --noconsole, redirect stdout/stderr to log files or null to prevent crashes
+if sys.stdout is None:
+    try:
+        log_dir = Path.home() / ".classtrack"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        sys.stdout = open(log_dir / "classtrack.log", "a", encoding="utf-8", buffering=1)
+    except Exception:
+        sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    try:
+        log_dir = Path.home() / ".classtrack"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        sys.stderr = open(log_dir / "classtrack_error.log", "a", encoding="utf-8", buffering=1)
+    except Exception:
+        sys.stderr = open(os.devnull, "w")
 
 import cv2
 import numpy as np

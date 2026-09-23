@@ -49,12 +49,17 @@ def resolve_model_path(model_name: str = "") -> str:
 
     if getattr(sys, "frozen", False):
         base = Path(sys.executable).resolve().parent
+        meipass = Path(getattr(sys, "_MEIPASS", base))
     else:
         base = Path(__file__).resolve().parent
+        meipass = base
 
     candidates = [
         base / "models" / Path(name).name,
+        base / "_internal" / "models" / Path(name).name,
+        meipass / "models" / Path(name).name,
         base / Path(name).name,
+        meipass / Path(name).name,
     ]
     for cand in candidates:
         if cand.is_file():
