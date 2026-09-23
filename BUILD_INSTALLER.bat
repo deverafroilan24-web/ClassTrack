@@ -18,6 +18,16 @@ if not exist "%PYTHON_EXE%" (
     exit /b 1
 )
 
+:: Private runtime configuration is included in the installer, never in the source ZIP.
+if not exist "desktop-app\.env" (
+    echo [ERROR] desktop-app\.env is missing. Add the private Render EDGE_API_KEY before building.
+    exit /b 1
+)
+findstr /R /C:"^[ ]*EDGE_API_KEY=." "desktop-app\.env" >nul
+if errorlevel 1 (
+    echo [ERROR] EDGE_API_KEY is empty in desktop-app\.env. The installer cannot authenticate with Render.
+    exit /b 1
+)
 :: 2. Ensure PyInstaller is installed
 echo [1/3] Verifying PyInstaller...
 "%PYTHON_EXE%" -m pip show pyinstaller >nul 2>&1
@@ -53,7 +63,11 @@ if not exist "%TEMP_BUILD%\dist\ClassTrack\models" mkdir "%TEMP_BUILD%\dist\Clas
 xcopy /E /I /Y "desktop-app\models" "%TEMP_BUILD%\dist\ClassTrack\models" >nul 2>&1
 if not exist "%TEMP_BUILD%\dist\ClassTrack\assets" mkdir "%TEMP_BUILD%\dist\ClassTrack\assets"
 xcopy /E /I /Y "desktop-app\assets" "%TEMP_BUILD%\dist\ClassTrack\assets" >nul 2>&1
-if exist "%TEMP_BUILD%\dist\ClassTrack\.env" del /f /q "%TEMP_BUILD%\dist\ClassTrack\.env"
+copy /Y "desktop-app\.env" "%TEMP_BUILD%\dist\ClassTrack\.env" >nul
+if errorlevel 1 (
+    echo [ERROR] Could not add the private runtime configuration to the installer build.
+    exit /b 1
+)
 
 :: 4. Locate Inno Setup Compiler (ISCC.exe)
 echo.
