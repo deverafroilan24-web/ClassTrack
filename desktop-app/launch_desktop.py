@@ -176,9 +176,9 @@ class CameraNodeApp:
             "earned_point": event.earned_point,
         }
 
-        # Post to dashboard (fire and forget in background)
+        # Send to dashboard in real-time (prefers WebSocket, falls back to REST)
         threading.Thread(
-            target=self.api_client.post_event,
+            target=self.api_client.send_event,
             args=(payload,),
             daemon=True,
         ).start()

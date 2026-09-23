@@ -31,6 +31,8 @@ class DashboardAPIClient:
         self.on_session_command = on_session_command
         self._http_connected = False
         self._ws_connected = False
+        self._ws = None
+        self._ws_lock = threading.Lock()
         self._ws_thread: Optional[threading.Thread] = None
         self._ws_running = False
         self._session_id: Optional[str] = None
@@ -122,7 +124,21 @@ class DashboardAPIClient:
                 return False
         except Exception as e:
             print(f"[APIClient] Failed to post event: {e}")
-            return False
+    def send_event(self, event_payload: dict) -> bool:
+        """
+        Send a gesture event in real time.
+        Prefers active WebSocket (<50ms latency), automatically falls back to REST POST.
+        """
+        with self._ws_lock:
+            ws = self._ws
+        if ws and self._ws_connected:
+            try:
+                msg = json.dumps({"type": "GESTURE_EVENT", "payload": event_payload})
+                ws.send(msg)
+                return True
+            except Exception as e:
+                print(f"[APIClient] WS send error, falling back to REST: {e}")
+        return self.post_event(event_payload)
 
     def sync_seats(self, seats_data: list, section_id: str = "") -> bool:
         """PUT /api/seats — push calibrated seat coordinates to dashboard."""
@@ -184,6 +200,8 @@ class DashboardAPIClient:
                 ws = websocket.WebSocket()
                 ws_headers = {"X-Edge-Key": self.api_key} if self.api_key else {}
                 ws.connect(ws_url, timeout=5, header=ws_headers)
+                with self._ws_lock:
+                    self._ws = ws
                 self._ws_connected = True
                 backoff_sec = 3.0  # reset backoff on success
                 print(f"[APIClient] Connected to dashboard WebSocket: {ws_url}")
@@ -192,9 +210,16 @@ class DashboardAPIClient:
                     try:
                         ws.settimeout(5.0)
                         data = ws.recv()
-                        if data:
+                        if not data:
+                            continue
+                        if data in ("pong", "ping"):
+                            continue
+                        try:
                             msg = json.loads(data)
                             self._handle_ws_message(msg)
+                        except json.JSONDecodeError:
+                            # Not JSON, ignore safely without disconnecting
+                            continue
                     except websocket.WebSocketTimeoutException:
                         # Send heartbeat
                         try:
@@ -205,8 +230,12 @@ class DashboardAPIClient:
                         print(f"[APIClient] WS receive error: {e}")
                         break
 
+                with self._ws_lock:
+                    self._ws = None
                 ws.close()
             except Exception as e:
+                with self._ws_lock:
+                    self._ws = None
                 print(f"[APIClient] WS connection failed: {e}")
 
             self._ws_connected = False

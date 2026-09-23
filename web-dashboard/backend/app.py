@@ -799,8 +799,8 @@ async def ingest_edge_event(body: EdgeEventIngest, x_edge_key: Optional[str] = H
     elif body.reason_code == "HAND_LOWERED":
         podium_queue.release_raise(body.seat_id)
 
-    # Generate event ID
-    event_id = body.session_id or f"evt_{body.timestamp_ms}_{uuid.uuid4().hex[:6]}"
+    # Generate unique event ID
+    event_id = f"evt_{body.timestamp_ms}_{uuid.uuid4().hex[:6]}"
 
     # Build event dict for DB persistence
     podium_entry = podium_queue.get_entry(body.seat_id)
