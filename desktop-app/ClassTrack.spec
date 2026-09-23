@@ -15,7 +15,6 @@ torch_datas = collect_data_files('torch')
 datas = [
     (str(desktop_dir / 'models'), 'models'),
     (str(desktop_dir / 'assets'), 'assets'),
-    (str(desktop_dir / '.env'), '.'),
 ] + ultralytics_datas + torch_datas
 
 hiddenimports = [

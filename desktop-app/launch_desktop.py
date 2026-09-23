@@ -137,6 +137,10 @@ class CameraNodeApp:
         elif msg_type == "CAMERA_SETTINGS_UPDATED":
             c_settings = msg.get("settings", {})
             self._apply_camera_settings(c_settings)
+        elif msg_type == "SEATS_UPDATED":
+            self._trigger_sync("RELOAD_SEATS")
+        elif msg_type == "SECTIONS_UPDATED":
+            self._trigger_sync("RELOAD_ALL")
         elif msg_type == "SESSION_STARTED":
             self._set_active_session({"id": msg.get("session_id"), "section_id": msg.get("section_id")})
         elif msg_type == "SESSION_STOPPED":
@@ -189,7 +193,7 @@ class CameraNodeApp:
             print(f"[CameraNode] Remote Setting: Confidence threshold = {conf:.2f}")
         if "model_name" in settings:
             target_model = settings["model_name"]
-            if target_model and target_model != self.vision_worker.model_path:
+            if target_model and target_model != Path(self.vision_worker.model_path).name:
                 try:
                     resolved = resolve_model_path(target_model)
                     swapped = self.vision_worker.switch_model(resolved)
@@ -205,11 +209,15 @@ class CameraNodeApp:
             if not session_id or session_id != self._active_session_id:
                 return
             section_id = self.section_id
+            student_id = next((seat.student_id for seat in self.vision_worker.seats
+                               if seat.id == event.seat_id), None)
 
         # Format event payload for the dashboard
         payload = {
+            "event_id": event.event_id,
             "section_id": section_id,
             "seat_id": event.seat_id,
+            "student_id": student_id,
             "student_name": event.student_name,
             "status": event.status,
             "reason_code": event.reason_code,
@@ -222,12 +230,8 @@ class CameraNodeApp:
             "earned_point": event.earned_point,
         }
 
-        # Send to dashboard in real-time (prefers WebSocket, falls back to REST)
-        threading.Thread(
-            target=self.api_client.send_event,
-            args=(payload,),
-            daemon=True,
-        ).start()
+        # Queue a confirmed HTTP event without blocking the camera frame loop.
+        self.api_client.send_event(payload)
 
     def _on_vision_raw_frame(self, frame: np.ndarray):
         """Store latest numpy frame directly for OpenCV window display (zero-copy)."""
@@ -242,7 +246,8 @@ class CameraNodeApp:
     def _trigger_sync(self, action: str):
         """Trigger background network action without stalling UI."""
         with self._sync_lock:
-            self._sync_action = action
+            if action == "RELOAD_ALL" or self._sync_action != "RELOAD_ALL":
+                self._sync_action = action
             self._sync_trigger.set()
 
     def _load_sections(self):
@@ -385,12 +390,15 @@ class CameraNodeApp:
                             poll_interval = 8.0
                         else:
                             poll_interval = min(20.0, poll_interval * 1.5)
-                    elif not self.sections:
-                        self._load_sections()
-                        if self.sections:
+                    else:
+                        # Reconcile even when the socket still looks connected:
+                        # proxies and sleeping services can miss commands.
+                        ok, active = self.api_client.fetch_active_session_result()
+                        if ok:
+                            self._set_active_session(active)
+                            if not self.sections:
+                                self._load_sections()
                             self._load_seats()
-                    elif self._active_session_id and self.vision_worker.session_id != self._active_session_id:
-                        self._load_seats()
             except Exception as e:
                 print(f"[CameraNode] Background sync error: {e}")
                 time.sleep(1.0)
@@ -481,6 +489,8 @@ def main():
     parser.add_argument("--confidence", type=float, default=DETECTION_CONFIDENCE, help="Detection confidence")
     args = parser.parse_args()
 
+    api_key = EDGE_API_KEY.strip()
+
     print("============================================================")
     print("  ClassTrack Camera Node (Desktop Vision App)               ")
     print(f"  Dashboard URL: {args.url}                                ")
@@ -495,7 +505,7 @@ def main():
 
     app = CameraNodeApp(
         dashboard_url=args.url,
-        api_key=EDGE_API_KEY,
+        api_key=api_key,
         video_source=args.cam,
         model_path=resolved_model,
         confidence=args.confidence,

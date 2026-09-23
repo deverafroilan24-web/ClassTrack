@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from vision_worker.face_engine import FaceEngine
@@ -60,6 +61,7 @@ class VisionWorker:
 
         self.show_skeleton: bool = False
         self.seats: List[SeatZone] = []
+        self._pending_seat_resets: set[str] = set()
         self.session_id: Optional[str] = None
         self._running = False
         self._restart_camera_requested = False
@@ -87,7 +89,7 @@ class VisionWorker:
             "yolo11s-pose.pt",
             "yolov8m-pose.pt",
         }
-        if model_name not in allowed:
+        if Path(model_name).name not in allowed:
             return False
 
         with self._lock:
@@ -127,6 +129,14 @@ class VisionWorker:
 
     def set_seats(self, seats: List[SeatZone]) -> None:
         with self._lock:
+            previous = {seat.id: seat for seat in self.seats}
+            current = {seat.id: seat for seat in seats}
+            for seat_id, old in previous.items():
+                new = current.get(seat_id)
+                if (new is None or old.student_id != new.student_id
+                        or old.student_name != new.student_name
+                        or old.is_present != new.is_present):
+                    self._pending_seat_resets.add(seat_id)
             self.seats = list(seats)
 
     def set_session_id(self, session_id: Optional[str]) -> None:
@@ -291,6 +301,10 @@ class VisionWorker:
             with self._lock:
                 current_seats = list(self.seats)
                 current_session = self.session_id
+                pending_resets = self._pending_seat_resets
+                self._pending_seat_resets = set()
+            for seat_id in pending_resets:
+                self.state_machine.reset_seat(seat_id)
 
             # 1. Run GPU Pose Inference (single-pass)
             detections = self.pose_engine.infer_frame(frame)

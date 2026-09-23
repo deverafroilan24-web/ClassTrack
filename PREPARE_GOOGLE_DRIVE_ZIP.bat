@@ -48,10 +48,10 @@ if exist "handout.md" copy "handout.md" "%PACKAGE_DIR%\Source_Code\" >nul
 if exist "BUILD_INSTALLER.bat" copy "BUILD_INSTALLER.bat" "%PACKAGE_DIR%\Source_Code\" >nul
 
 :: Copy desktop-app without .venv or __pycache__
-robocopy "desktop-app" "%PACKAGE_DIR%\Source_Code\desktop-app" /E /XD ".venv" "__pycache__" /XF "*.pyc" >nul
+robocopy "desktop-app" "%PACKAGE_DIR%\Source_Code\desktop-app" /E /XD ".venv" "__pycache__" /XF "*.pyc" ".env" ".env.local" ".env.production" >nul
 
 :: Copy web-dashboard without .venv or __pycache__
-robocopy "web-dashboard" "%PACKAGE_DIR%\Source_Code\web-dashboard" /E /XD ".venv" "__pycache__" /XF "*.pyc" >nul
+robocopy "web-dashboard" "%PACKAGE_DIR%\Source_Code\web-dashboard" /E /XD ".venv" "__pycache__" /XF "*.pyc" ".env" ".env.local" ".env.production" >nul
 
 echo [4/4] Creating lightweight Source_Code.zip (for evaluators/developers)...
 powershell -NoProfile -Command "Compress-Archive -Path '%PACKAGE_DIR%\Source_Code\*' -DestinationPath '%PACKAGE_DIR%\ClassTrack_Source_Code.zip' -Force"

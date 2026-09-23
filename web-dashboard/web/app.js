@@ -52,7 +52,10 @@ let role = "guest";
 let authGeneration = 0;
 let seatDataRequestId = 0;
 let ledgerRequestId = 0;
+let liveSessionRequestId = 0;
 let seatingMutationInProgress = false;
+let sessionMutationInProgress = false;
+const manualAwardsInProgress = new Set();
 let seatDataLoadingFor = "";
 let eventsSocket = null;
 let socketReconnectTimer = null;
@@ -250,6 +253,7 @@ window.submitGuestLogin = async function (event) {
 async function loadAuthorizedData() {
   const activeResponse = await fetch("/api/sessions/active");
   activeSession = activeResponse.ok ? await activeResponse.json() : null;
+  if (activeSession?.section_id) currentSectionId = activeSession.section_id;
   await fetchSections();
   await Promise.all(role === "teacher" ? [fetchSeats(), fetchRecitationLedger()] : [fetchRecitationLedger()]);
   updateSessionUI();
@@ -493,6 +497,39 @@ async function fetchTeachers() {
   </tr>`).join("") || '<tr><td colspan="4" class="px-4 py-6 text-center text-slate-500">No teacher accounts yet.</td></tr>';
 }
 
+async function reconcileLiveSession() {
+  if (!teacherToken && !guestToken) return;
+  const generation = authGeneration;
+  const requestId = ++liveSessionRequestId;
+  const previousSessionId = activeSession?.id || "";
+  try {
+    const response = await fetch("/api/sessions/active", { cache: "no-store" });
+    if (!response.ok || generation !== authGeneration || requestId !== liveSessionRequestId) return;
+    const session = await response.json();
+    if (generation !== authGeneration || requestId !== liveSessionRequestId ||
+        previousSessionId !== (activeSession?.id || "")) return;
+    if (role === "guest" && !session) {
+      enterGuestMode();
+      showToast("Viewing code expired. Ask your teacher for the current code.", "warning");
+      return;
+    }
+    const changed = (session?.id || "") !== (activeSession?.id || "");
+    if (changed) {
+      activeSession = session;
+      if (session?.section_id && role === "teacher") {
+        currentSectionId = session.section_id;
+        populateSectionDropdown();
+        updateSectionUI();
+        await fetchSeats();
+      }
+      updateSessionUI();
+    }
+    await fetchRecitationLedger();
+  } catch (error) {
+    console.warn("Live session refresh failed", error);
+  }
+}
+
 function showTeacherAdminMessage(message, isError = false) {
   const element = document.getElementById("teacher-admin-message");
   element.textContent = message;
@@ -710,14 +747,16 @@ window.onReportsSectionChange = function (e) {
 
 function updateSectionUI() {
   const current = sectionsList.find((s) => s.id === currentSectionId);
+  const liveSection = sectionsList.find((s) => s.id === (activeSession?.section_id || currentSectionId));
+  if (currentSectionRoomLabel) currentSectionRoomLabel.textContent = liveSection
+    ? (liveSection.room ? `${liveSection.name} • ${liveSection.room}` : liveSection.name)
+    : "No Section Selected";
   if (current) {
-    if (currentSectionRoomLabel) currentSectionRoomLabel.textContent = current.room ? `${current.name} • ${current.room}` : current.name;
     const repTitle = document.getElementById("reports-class-title");
     if (repTitle) {
       repTitle.textContent = `${current.name} — Class Participation Report`;
     }
   } else {
-    if (currentSectionRoomLabel) currentSectionRoomLabel.textContent = "No Section Selected";
     const repTitle = document.getElementById("reports-class-title");
     if (repTitle) {
       repTitle.textContent = "No Section Selected — Class Participation Report";
@@ -1044,7 +1083,7 @@ window.submitNewSection = async function (e) {
 // ============================================================================
 async function fetchRecitationLedger() {
   const requestId = ++ledgerRequestId;
-  const sectionId = currentSectionId;
+  const sectionId = activeSession?.section_id || currentSectionId;
   const sessionId = activeSession?.id || "";
   try {
     const generation = authGeneration;
@@ -1057,7 +1096,7 @@ async function fetchRecitationLedger() {
     if (
       generation !== authGeneration ||
       requestId !== ledgerRequestId ||
-      sectionId !== currentSectionId ||
+      sectionId !== (activeSession?.section_id || currentSectionId) ||
       sessionId !== (activeSession?.id || "")
     ) return;
     currentLedger = ledger;
@@ -1130,7 +1169,7 @@ function renderRecitationLedger() {
       `;
     } else {
       actionBtn = `
-        <button onclick="awardDirectStudent('${student.seat_id}')" class="text-[11px] text-slate-500 hover:text-slate-800 font-medium px-1.5 py-0.5 bg-slate-100 hover:bg-slate-200 rounded border border-slate-200">+1</button>
+        <button onclick="awardDirectStudent('${student.seat_id}')" title="Award a participation point manually" class="text-[11px] text-slate-500 hover:text-slate-800 font-medium px-1.5 py-0.5 bg-slate-100 hover:bg-slate-200 rounded border border-slate-200">+1 manual</button>
       `;
     }
 
@@ -1237,8 +1276,22 @@ window.dismissStudentEvent = async function (eventId) {
 };
 
 window.awardDirectStudent = async function (seatId) {
-  // Direct manual award: toggle or trigger point
-  fetchRecitationLedger();
+  if (manualAwardsInProgress.has(seatId)) return;
+  manualAwardsInProgress.add(seatId);
+  try {
+    const sectionId = activeSession?.section_id || currentSectionId;
+    const res = await fetch(`/api/seats/${encodeURIComponent(seatId)}/award?section_id=${encodeURIComponent(sectionId)}`, { method: "POST" });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || "Manual point award failed");
+    }
+    showToast("Manual participation point awarded", "success");
+    fetchRecitationLedger();
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    manualAwardsInProgress.delete(seatId);
+  }
 };
 
 // ============================================================================
@@ -2558,6 +2611,7 @@ function updateSessionUI() {
     if (bannerStop) bannerStop.classList.add("hidden");
     if (titleHeader) titleHeader.textContent = "Live Class Session";
   }
+  updateSectionUI();
 }
 
 async function fetchGuestAccess() {
@@ -2593,6 +2647,8 @@ window.copyGuestAccessCode = async function () {
 };
 
 window.startClassSession = async function () {
+  if (activeSession || sessionMutationInProgress) return;
+  sessionMutationInProgress = true;
   const current = sectionsList.find((s) => s.id === currentSectionId);
   const className = current ? current.name : "Class";
   const defaultTitle = `${className} Session - ${new Date().toLocaleDateString()}`;
@@ -2615,10 +2671,13 @@ window.startClassSession = async function () {
     fetchSessionsHistory();
   } catch (err) {
     showToast(err.message, "error");
+  } finally {
+    sessionMutationInProgress = false;
   }
 };
 
 window.stopClassSession = async function () {
+  if (!activeSession || sessionMutationInProgress) return;
   const confirmed = await showConfirmModal({
     title: "End Class Session",
     message: "Are you sure you want to end the active class session? All student raises and participation points will be permanently saved in Session History.",
@@ -2628,6 +2687,7 @@ window.stopClassSession = async function () {
   });
   if (!confirmed) return;
 
+  sessionMutationInProgress = true;
   try {
     const res = await fetch("/api/sessions/stop", { method: "POST" });
     if (!res.ok) throw new Error("Failed to end session");
@@ -2638,6 +2698,8 @@ window.stopClassSession = async function () {
     fetchSessionsHistory();
   } catch (err) {
     showToast(err.message, "error");
+  } finally {
+    sessionMutationInProgress = false;
   }
 };
 
@@ -2939,6 +3001,7 @@ async function bootApp() {
   }
   fetchEdgeStatus();
   setInterval(fetchEdgeStatus, 15000);
+  setInterval(reconcileLiveSession, 5000);
 }
 bootApp();
 

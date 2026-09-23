@@ -8,6 +8,7 @@ Handles:
 """
 
 import json
+import queue
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -36,6 +37,8 @@ class DashboardAPIClient:
         self._ws_thread: Optional[threading.Thread] = None
         self._ws_running = False
         self._session_id: Optional[str] = None
+        self._event_queue: queue.Queue = queue.Queue()
+        self._event_thread: Optional[threading.Thread] = None
 
     @property
     def is_connected(self) -> bool:
@@ -103,17 +106,21 @@ class DashboardAPIClient:
 
     def fetch_active_session(self) -> Optional[Dict[str, Any]]:
         """GET /api/sessions/active"""
+        _, session = self.fetch_active_session_result()
+        return session
+
+    def fetch_active_session_result(self) -> tuple[bool, Optional[Dict[str, Any]]]:
+        """Distinguish an idle dashboard from a failed request."""
         try:
             resp = requests.get(f"{self.base_url}/api/sessions/active", headers=self._headers(), timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
-                if data:
-                    self._session_id = data.get("id")
-                return data
-            return None
+                self._session_id = data.get("id") if data else None
+                return True, data
+            print(f"[APIClient] Active session request returned {resp.status_code}")
         except Exception as e:
             print(f"[APIClient] Failed to fetch active session: {e}")
-            return None
+        return False, None
 
     def post_event(self, event_payload: dict) -> bool:
         """POST /api/events/ingest — send a gesture event to the dashboard."""
@@ -126,29 +133,46 @@ class DashboardAPIClient:
             )
             if resp.status_code == 200:
                 return True
-            elif resp.status_code == 409:
-                # No active session
-                return False
             else:
                 print(f"[APIClient] Event ingest returned {resp.status_code}: {resp.text}")
                 return False
         except Exception as e:
             print(f"[APIClient] Failed to post event: {e}")
+            return False
+
     def send_event(self, event_payload: dict) -> bool:
-        """
-        Send a gesture event in real time.
-        Prefers active WebSocket (<50ms latency), automatically falls back to REST POST.
-        """
-        with self._ws_lock:
-            ws = self._ws
-        if ws and self._ws_connected:
+        """Queue events in camera order; REST confirms persistence before the next event."""
+        if self._event_thread is None or not self._event_thread.is_alive():
+            self._event_thread = threading.Thread(target=self._event_loop, daemon=True, name="EdgeEventSender")
+            self._event_thread.start()
+        self._event_queue.put_nowait(dict(event_payload))
+        return True
+
+    def _event_loop(self):
+        while True:
+            payload = self._event_queue.get()
             try:
-                msg = json.dumps({"type": "GESTURE_EVENT", "payload": event_payload})
-                ws.send(msg)
-                return True
-            except Exception as e:
-                print(f"[APIClient] WS send error, falling back to REST: {e}")
-        return self.post_event(event_payload)
+                attempt = 0
+                while True:
+                    try:
+                        response = requests.post(
+                            f"{self.base_url}/api/events/ingest",
+                            json=payload, headers=self._headers(), timeout=5,
+                        )
+                        if response.status_code == 200:
+                            break
+                        if response.status_code in (400, 401, 403, 404, 409, 422):
+                            print(f"[APIClient] Event rejected ({response.status_code}): {response.text}")
+                            break
+                        if attempt == 0 or attempt % 6 == 0:
+                            print(f"[APIClient] Event delivery failed ({response.status_code}); retrying")
+                    except requests.RequestException as exc:
+                        if attempt == 0 or attempt % 6 == 0:
+                            print(f"[APIClient] Event delivery error: {exc}; retrying")
+                    attempt += 1
+                    time.sleep(min(2 ** min(attempt - 1, 3), 8))
+            finally:
+                self._event_queue.task_done()
 
     def sync_seats(self, seats_data: list, section_id: str = "") -> bool:
         """PUT /api/seats — push calibrated seat coordinates to dashboard."""

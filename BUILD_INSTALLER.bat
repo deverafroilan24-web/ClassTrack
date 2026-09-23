@@ -24,6 +24,10 @@ echo [1/3] Verifying PyInstaller...
 if errorlevel 1 (
     echo PyInstaller not found. Installing now...
     "%PYTHON_EXE%" -m pip install pyinstaller
+    if errorlevel 1 (
+        echo [ERROR] Could not install PyInstaller.
+        exit /b 1
+    )
 )
 
 set "TEMP_BUILD=%LOCALAPPDATA%\ClassTrackBuild"
@@ -49,7 +53,7 @@ if not exist "%TEMP_BUILD%\dist\ClassTrack\models" mkdir "%TEMP_BUILD%\dist\Clas
 xcopy /E /I /Y "desktop-app\models" "%TEMP_BUILD%\dist\ClassTrack\models" >nul 2>&1
 if not exist "%TEMP_BUILD%\dist\ClassTrack\assets" mkdir "%TEMP_BUILD%\dist\ClassTrack\assets"
 xcopy /E /I /Y "desktop-app\assets" "%TEMP_BUILD%\dist\ClassTrack\assets" >nul 2>&1
-copy /Y "desktop-app\.env" "%TEMP_BUILD%\dist\ClassTrack\.env" >nul 2>&1
+if exist "%TEMP_BUILD%\dist\ClassTrack\.env" del /f /q "%TEMP_BUILD%\dist\ClassTrack\.env"
 
 :: 4. Locate Inno Setup Compiler (ISCC.exe)
 echo.
@@ -65,13 +69,12 @@ if not defined ISCC_EXE (
 )
 
 if not defined ISCC_EXE (
-    echo [WARNING] Inno Setup compiler ISCC.exe was not found in standard paths.
-    echo The unpacked application is available at: %TEMP_BUILD%\dist\ClassTrack\ClassTrack.exe
-    pause
-    exit /b 0
+    echo [ERROR] Inno Setup compiler ISCC.exe was not found.
+    echo Install Inno Setup 6 and run BUILD_INSTALLER.bat again.
+    exit /b 1
 )
 
-"%ISCC_EXE%" /DAppSourceDir="%TEMP_BUILD%\dist\ClassTrack" desktop-app\installer.iss
+"%ISCC_EXE%" /DAppSourceDir="%TEMP_BUILD%\dist\ClassTrack" /O"%CD%\dist\installer" desktop-app\installer.iss
 
 if errorlevel 1 (
     echo.

@@ -1,7 +1,7 @@
-# ClassTrack — Project Handout & System Brief
+j# ClassTrack — Project Handout & System Brief
 
 ## 1. Executive Summary & Purpose
-**ClassTrack** is an automated, AI-powered **Classroom Participation and Recitation Monitoring System**.
+**ClassTrack** is an automated, AI-powered **Classroom Participation and Recitation Monitoring System**. 
 
 The system solves common classroom challenges:
 - **Biased or subjective recitation tracking**: Teachers no longer guess who raised their hand first.

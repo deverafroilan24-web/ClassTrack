@@ -91,6 +91,7 @@ class PodiumQueueManager:
         entries = self.get_podium()
         return {
             e.seat_id: {
+                "student_name": e.student_name,
                 "queue_pos": e.queue_position,
                 "delta_ms": e.delta_ms,
                 "raised_at_ms": e.timestamp_ms,

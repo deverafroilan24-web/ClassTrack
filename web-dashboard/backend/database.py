@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS events (
     id TEXT PRIMARY KEY,
     session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
     seat_id TEXT,
+    student_id TEXT,
     student_name TEXT NOT NULL,
     status TEXT NOT NULL,
     reason_code TEXT NOT NULL,
@@ -217,6 +218,7 @@ class DatabaseManager:
             if self.is_postgres:
                 conn.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS guest_code TEXT")
                 conn.execute("ALTER TABLE sections ADD COLUMN IF NOT EXISTS teacher_id TEXT")
+                conn.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS student_id TEXT")
             else:
                 if "guest_code" not in {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}:
                     conn.execute("ALTER TABLE sessions ADD COLUMN guest_code TEXT")
@@ -395,6 +397,8 @@ class DatabaseManager:
                 conn.execute("ALTER TABLE events ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'VERIFIED';")
             if evt_cols and "face_similarity" not in evt_cols:
                 conn.execute("ALTER TABLE events ADD COLUMN face_similarity REAL NOT NULL DEFAULT 1.0;")
+            if evt_cols and "student_id" not in evt_cols:
+                conn.execute("ALTER TABLE events ADD COLUMN student_id TEXT;")
 
             conn.executescript(SCHEMA_SQL)
 
@@ -560,10 +564,11 @@ class DatabaseManager:
                     s.id as assigned_seat_id,
                     s.label as assigned_seat_label,
                     COALESCE(SUM(CASE WHEN e.earned_point = 1 THEN 1 ELSE 0 END), 0) as total_points,
-                    COUNT(e.id) as total_raises
+                    COALESCE(SUM(CASE WHEN e.status = 'VALID' AND e.reason_code = 'VALID_HAND_RAISE' THEN 1 ELSE 0 END), 0) as total_raises
                 FROM students st
                 LEFT JOIN seats s ON (st.id = s.student_id OR (s.student_id IS NULL AND s.student_name = st.name))
-                LEFT JOIN events e ON (s.id = e.seat_id OR st.name = e.student_name)
+                LEFT JOIN events e ON (e.student_id = st.id OR (e.student_id IS NULL AND e.student_name = st.name))
+                    AND e.session_id IN (SELECT id FROM sessions WHERE section_id = st.section_id)
             """
             params: List[Any] = []
             if section_id:
@@ -836,6 +841,7 @@ class DatabaseManager:
                 FROM seats s
                 LEFT JOIN students st ON (s.student_id = st.id OR (s.student_id IS NULL AND s.student_name = st.name))
                 LEFT JOIN events e ON s.id = e.seat_id
+                    AND (e.student_id = s.student_id OR (e.student_id IS NULL AND e.student_name = COALESCE(st.name, s.student_name)))
             """
             params: List[Any] = []
             conditions = []
@@ -1196,7 +1202,7 @@ class DatabaseManager:
                     COUNT(DISTINCT CASE WHEN e.verification_status = 'SEAT_MISMATCH' THEN e.id END) as seat_mismatches
                 FROM students st
                 LEFT JOIN seats s ON st.id = s.student_id AND s.section_id = st.section_id
-                LEFT JOIN events e ON (s.id = e.seat_id OR (s.id IS NULL AND st.name = e.student_name))
+                LEFT JOIN events e ON (e.student_id = st.id OR (e.student_id IS NULL AND e.student_name = st.name))
                     AND e.session_id IN (SELECT id FROM sessions WHERE section_id = st.section_id)
                 WHERE st.section_id = ?
                 GROUP BY st.id
@@ -1375,7 +1381,7 @@ class DatabaseManager:
             if session_id:
                 q += " WHERE session_id = ?"
                 p.append(session_id)
-            q += " ORDER BY timestamp_ms DESC"
+            q += " ORDER BY timestamp_ms DESC, id DESC"
             cursor = conn.execute(q, p)
             all_events = [dict(r) for r in cursor.fetchall()]
 
@@ -1389,14 +1395,17 @@ class DatabaseManager:
 
         ledger = []
         for seat in seats:
-            evts = events_by_seat.get(seat["id"], [])
+            evts = [event for event in events_by_seat.get(seat["id"], [])
+                    if (event.get("student_id") == seat.get("student_id") if event.get("student_id")
+                        else event["student_name"] == seat["student_name"])]
             valid_raises = [e for e in evts if e["status"] == "VALID"]
             points = sum(1 for e in evts if e.get("earned_point") == 1)
             latest = evts[0] if evts else None
 
             # Determine live raise state (whether the student is raising their hand RIGHT NOW)
             if active_podium_map is not None:
-                if seat["id"] in active_podium_map:
+                if (seat["id"] in active_podium_map and seat["is_present"]
+                        and active_podium_map[seat["id"]].get("student_name") == seat["student_name"]):
                     pod_info = active_podium_map[seat["id"]]
                     live_status = "VALID"
                     live_queue_pos = pod_info.get("queue_pos")
@@ -1447,7 +1456,7 @@ class DatabaseManager:
 
         def sort_key(s):
             podium = s["latest_queue_pos"] if (s["latest_queue_pos"] and s["latest_status"] == "VALID") else 999
-            return (podium, -s["total_raises"], s["label"])
+            return (podium, s["label"])
 
         ledger.sort(key=sort_key)
         return ledger
@@ -1455,21 +1464,23 @@ class DatabaseManager:
     # -------------------------------------------------------------
     # EVENTS
     # -------------------------------------------------------------
-    def insert_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+    def insert_event(self, event: Dict[str, Any]) -> bool:
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
-                INSERT OR REPLACE INTO events (
-                    id, session_id, seat_id, student_name,
+                INSERT INTO events (
+                    id, session_id, seat_id, student_id, student_name,
                     status, reason_code, arm_angle, duration_sec,
                     queue_pos, timestamp_ms, earned_point,
                     verification_status, face_similarity
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (id) DO NOTHING
                 """,
                 (
                     event["event_id"],
                     event.get("session_id"),
                     event["seat_id"],
+                    event.get("student_id"),
                     event["student_name"],
                     event["status"],
                     event["reason_code"],
@@ -1482,7 +1493,7 @@ class DatabaseManager:
                     float(event.get("face_similarity", 1.0)),
                 ),
             )
-        return event
+        return cursor.rowcount > 0
 
     def award_point(self, event_id: str, force_override: bool = False) -> Dict[str, Any]:
         with self._connect() as conn:
@@ -1515,6 +1526,23 @@ class DatabaseManager:
                 cursor = conn.execute("SELECT * FROM events ORDER BY timestamp_ms DESC LIMIT ?", (limit,))
             return [dict(r) for r in cursor.fetchall()]
 
+    def get_latest_gesture_events(self, session_id: str) -> List[Dict[str, Any]]:
+        """Last camera state for each desk, used to restore a live queue after restart."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                SELECT * FROM (
+                    SELECT e.*, ROW_NUMBER() OVER (
+                        PARTITION BY seat_id ORDER BY timestamp_ms DESC, id DESC
+                    ) AS row_number
+                    FROM events e
+                    WHERE session_id = ? AND status IN ('VALID', 'INVALID', 'IDLE')
+                ) recent WHERE row_number = 1 ORDER BY timestamp_ms ASC
+                """,
+                (session_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     # -------------------------------------------------------------
     # EXPORTS
     # -------------------------------------------------------------
@@ -1531,7 +1559,9 @@ class DatabaseManager:
                 COALESCE(SUM(CASE WHEN e.status = 'VALID' THEN 1 ELSE 0 END), 0) as valid_raises,
                 COALESCE(SUM(CASE WHEN e.status = 'INVALID' THEN 1 ELSE 0 END), 0) as invalid_gestures
             FROM seats s
-            LEFT JOIN events e ON s.id = e.seat_id AND (? IS NULL OR e.session_id = ?)
+            LEFT JOIN events e ON s.id = e.seat_id
+                AND (e.student_id = s.student_id OR (e.student_id IS NULL AND e.student_name = s.student_name))
+                AND (? IS NULL OR e.session_id = ?)
             WHERE (? IS NULL OR s.section_id = ? OR s.section_id IS NULL)
             GROUP BY s.id, s.label, s.student_name, s.student_id_number, s.is_present ORDER BY s.label ASC
             """

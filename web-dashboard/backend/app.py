@@ -111,6 +111,11 @@ def _event_visible_to_teacher(event_dict: dict, teacher_id: str) -> bool:
 class ConnectionManager:
     @staticmethod
     async def broadcast_event(event_dict: dict):
+        if event_dict.get("type") in {"SEATS_UPDATED", "STUDENTS_UPDATED"}:
+            _prune_live_queue()
+            await ConnectionManager.broadcast_to_edge({"type": "SEATS_UPDATED"})
+        elif event_dict.get("type") == "SECTIONS_UPDATED":
+            await ConnectionManager.broadcast_to_edge({"type": "SECTIONS_UPDATED"})
         if not event_subscribers:
             return
         public_event = _guest_safe(event_dict)
@@ -173,10 +178,41 @@ class ConnectionManager:
 main_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
+def _restore_live_queue() -> None:
+    podium_queue.clear()
+    active = db.get_active_session()
+    if not active:
+        return
+    seats = {seat["id"]: seat for seat in db.get_seats(section_id=active["section_id"])}
+    for event in db.get_latest_gesture_events(active["id"]):
+        seat = seats.get(event["seat_id"])
+        if (event["status"] == "VALID" and event["reason_code"] == "VALID_HAND_RAISE"
+                and seat and seat["is_present"] and seat.get("student_id")
+                and (seat["student_id"] == event["student_id"] if event.get("student_id")
+                     else seat["student_name"] == event["student_name"])):
+            podium_queue.register_raise(
+                seat_id=event["seat_id"], student_name=event["student_name"],
+                arm_angle=event["arm_angle"], timestamp_ms=event["timestamp_ms"],
+            )
+
+
+def _prune_live_queue() -> None:
+    active = db.get_active_session()
+    if not active:
+        podium_queue.clear()
+        return
+    seats = {seat["id"]: seat for seat in db.get_seats(section_id=active["section_id"])}
+    for entry in podium_queue.get_podium():
+        seat = seats.get(entry.seat_id)
+        if not seat or not seat["is_present"] or seat["student_name"] != entry.student_name:
+            podium_queue.release_raise(entry.seat_id)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global main_loop
     main_loop = asyncio.get_running_loop()
+    _restore_live_queue()
     print("[Web Dashboard] FastAPI initialized — Cloud-ready, zero CV dependencies.")
     yield
     print("[Web Dashboard] FastAPI shutdown complete.")
@@ -771,13 +807,18 @@ async def get_recitation_ledger(session_id: Optional[str] = None, section_id: Op
         session = db.get_session_details(session_id, teacher_id=teacher_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        section_id = section_id or session.get("section_id")
+        if section_id and section_id != session.get("section_id"):
+            raise HTTPException(status_code=400, detail="Session belongs to another class section")
+        section_id = session.get("section_id")
     elif active:
         section_id = section_id or active.get("section_id")
     if teacher and section_id and db.get_section_owner(section_id) != teacher_id:
         raise HTTPException(status_code=404, detail="Section not found")
     target_session_id = session_id if session_id is not None else (active["id"] if active else None)
-    active_podium_map = podium_queue.get_podium_map()
+    _prune_live_queue()
+    current_session = db.get_active_session()
+    active_podium_map = (podium_queue.get_podium_map()
+                         if current_session and target_session_id == current_session["id"] else {})
     ledger = db.get_recitation_ledger(
         session_id=target_session_id,
         section_id=section_id,
@@ -795,9 +836,14 @@ async def get_sessions(section_id: Optional[str] = None, date: Optional[str] = N
 
 
 @app.get("/api/sessions/active", response_model=Optional[SessionResponse])
-async def get_active_session(x_teacher_token: Optional[str] = Header(default=None)):
+async def get_active_session(x_teacher_token: Optional[str] = Header(default=None),
+                             x_guest_token: Optional[str] = Header(default=None)):
     teacher_id = _teacher_id_from_token(x_teacher_token)
-    return db.get_active_session(teacher_id=teacher_id) if teacher_id else db.get_active_session()
+    if teacher_id:
+        return db.get_active_session(teacher_id=teacher_id)
+    if x_guest_token:
+        return _guest_session(x_guest_token)
+    return db.get_active_session()
 
 
 @app.get("/api/sessions/active/guest-access")
@@ -848,8 +894,11 @@ async def start_session(body: SessionStartRequest, x_teacher_token: Optional[str
     if not body.section_id or body.section_id not in owned_section_ids:
         raise HTTPException(status_code=400, detail="Select a valid class section before starting")
     current_session = db.get_active_session()
-    if current_session and not _session_belongs_to_teacher(current_session, teacher_id):
-        raise HTTPException(status_code=409, detail="Another teacher has an active class session")
+    if current_session:
+        detail = ("End the current class session before starting another"
+                  if _session_belongs_to_teacher(current_session, teacher_id)
+                  else "Another teacher has an active class session")
+        raise HTTPException(status_code=409, detail=detail)
     sess = db.start_session(title=body.title, section_id=body.section_id)
     # Clear podium queue for fresh session
     podium_queue.clear()
@@ -969,6 +1018,33 @@ async def get_events(limit: int = 50, x_teacher_token: Optional[str] = Header(de
     return db.get_events(session_id=active["id"], limit=limit) if active else []
 
 
+@app.post("/api/seats/{seat_id}/award")
+async def award_manual_point(seat_id: str, section_id: str,
+                             x_teacher_token: Optional[str] = Header(default=None)):
+    _enforce_owned_section(section_id, x_teacher_token)
+    active = db.get_active_session(teacher_id=_teacher_id_from_token(x_teacher_token))
+    if not active or active["section_id"] != section_id:
+        raise HTTPException(status_code=409, detail="Start this class session before awarding a point")
+    seat = next((item for item in db.get_seats(section_id=section_id) if item["id"] == seat_id), None)
+    if not seat or not seat.get("student_id"):
+        raise HTTPException(status_code=404, detail="Assigned student desk not found")
+    event_id = f"manual_{uuid.uuid4().hex}"
+    db.insert_event({
+        "event_id": event_id, "session_id": active["id"], "seat_id": seat_id,
+        "student_id": seat["student_id"],
+        "student_name": seat["student_name"], "status": "MANUAL",
+        "reason_code": "MANUAL_POINT", "arm_angle_deg": 0,
+        "duration_sec": 0, "queue_pos": None,
+        "timestamp_ms": time.time_ns() // 1_000_000, "earned_point": 1,
+    })
+    await ConnectionManager.broadcast_event({
+        "type": "POINT_AWARDED",
+        "payload": {"id": event_id, "session_id": active["id"],
+                    "teacher_id": _teacher_id_from_token(x_teacher_token)},
+    })
+    return {"id": event_id, "status": "AWARDED", "earned_point": 1}
+
+
 @app.post("/api/events/{event_id}/award", response_model=EventActionResponse)
 async def award_event_point(event_id: str, force: bool = False,
                             x_teacher_token: Optional[str] = Header(default=None)):
@@ -1078,43 +1154,59 @@ async def ingest_edge_event(body: EdgeEventIngest, x_edge_key: Optional[str] = H
         raise HTTPException(status_code=409, detail="Camera event belongs to another class section")
 
     session_id = active["id"]
+    if body.session_id and body.session_id != session_id:
+        raise HTTPException(status_code=409, detail="Camera event belongs to an ended class session")
+    seat = next((seat for seat in db.get_seats(section_id=body.section_id) if seat["id"] == body.seat_id), None)
+    if not seat or not seat["is_present"] or not seat.get("student_id"):
+        raise HTTPException(status_code=409, detail="Desk is not assigned to a present student")
+    if body.student_id and body.student_id != seat["student_id"]:
+        raise HTTPException(status_code=409, detail="Desk assignment changed; sync camera seats")
+    if body.student_name != seat["student_name"]:
+        raise HTTPException(status_code=409, detail="Student assignment changed; sync camera seats")
 
-    # Update server-side podium queue
-    if body.status == "VALID" and body.reason_code == "VALID_HAND_RAISE":
-        podium_queue.register_raise(
-            seat_id=body.seat_id,
-            student_name=body.student_name,
-            arm_angle=body.arm_angle_deg,
-            timestamp_ms=body.timestamp_ms,
-        )
-    elif body.reason_code == "HAND_LOWERED":
-        podium_queue.release_raise(body.seat_id)
-
-    # Generate unique event ID
-    event_id = f"evt_{body.timestamp_ms}_{uuid.uuid4().hex[:6]}"
+    event_id = body.event_id or f"evt_{body.timestamp_ms}_{uuid.uuid4().hex[:6]}"
 
     # Build event dict for DB persistence
-    podium_entry = podium_queue.get_entry(body.seat_id)
     fallback_queue_pos = body.queue_pos if body.queue_pos is not None else body.podium_rank
     event_dict = {
         "event_id": event_id,
         "session_id": session_id,
         "seat_id": body.seat_id,
-        "student_name": body.student_name,
+        "student_id": seat["student_id"],
+        "student_name": seat["student_name"],
         "status": body.status,
         "reason_code": body.reason_code,
         "arm_angle_deg": body.arm_angle_deg,
         "duration_sec": body.duration_sec,
-        "queue_pos": podium_entry.queue_position if podium_entry else fallback_queue_pos,
-        "delta_ms": podium_entry.delta_ms if podium_entry else body.delta_ms,
+        "queue_pos": fallback_queue_pos,
+        "delta_ms": body.delta_ms,
         "timestamp_ms": body.timestamp_ms,
         "earned_point": body.earned_point,
     }
 
     try:
-        db.insert_event(event_dict)
+        inserted = db.insert_event(event_dict)
     except Exception as e:
         print(f"[Edge Ingest] Error persisting event to DB: {e}")
+        raise HTTPException(status_code=503, detail="Could not save camera event") from e
+    if not inserted:
+        return {"status": "duplicate", "event_id": event_id}
+
+    # Change the live queue only after the event has been saved.
+    if body.status == "VALID" and body.reason_code == "VALID_HAND_RAISE":
+        existing = podium_queue.get_entry(body.seat_id)
+        if existing and existing.student_name != seat["student_name"]:
+            podium_queue.release_raise(body.seat_id)
+        podium_entry = podium_queue.register_raise(
+            seat_id=body.seat_id,
+            student_name=seat["student_name"],
+            arm_angle=body.arm_angle_deg,
+            timestamp_ms=body.timestamp_ms,
+        )
+        event_dict["queue_pos"] = podium_entry.queue_position
+        event_dict["delta_ms"] = podium_entry.delta_ms
+    elif body.reason_code == "HAND_LOWERED" or body.status == "INVALID":
+        podium_queue.release_raise(body.seat_id)
 
     # Broadcast to all browser WebSocket clients with optimized ledger
     active_podium_map = podium_queue.get_podium_map()
@@ -1192,6 +1284,7 @@ async def update_camera_settings(payload: dict):
 @app.get("/api/edge/status")
 async def get_edge_status():
     """Returns status of connected Camera Nodes."""
+    _prune_live_queue()
     return {
         "connected_nodes": len(edge_subscribers),
         "podium_active": len(podium_queue.get_podium()),
@@ -1290,57 +1383,15 @@ async def ws_edge(websocket: WebSocket):
                 msg_type = msg.get("type", "")
 
                 if msg_type == "GESTURE_EVENT":
-                    # Process inline gesture event from edge WebSocket
                     body = EdgeEventIngest(**msg.get("payload", {}))
-                    # Reuse the ingest logic
-                    active = db.get_active_session()
-                    if active:
-                        if body.section_id != active["section_id"]:
-                            continue
-                        session_id = active["id"]
-                        if body.status == "VALID" and body.reason_code == "VALID_HAND_RAISE":
-                            podium_queue.register_raise(
-                                seat_id=body.seat_id,
-                                student_name=body.student_name,
-                                arm_angle=body.arm_angle_deg,
-                                timestamp_ms=body.timestamp_ms,
-                            )
-                        elif body.reason_code == "HAND_LOWERED":
-                            podium_queue.release_raise(body.seat_id)
-
-                        event_id = f"evt_{body.timestamp_ms}_{uuid.uuid4().hex[:6]}"
-                        podium_entry = podium_queue.get_entry(body.seat_id)
-                        fallback_qp = body.queue_pos if body.queue_pos is not None else body.podium_rank
-                        event_dict = {
-                            "event_id": event_id,
-                            "session_id": session_id,
-                            "seat_id": body.seat_id,
-                            "student_name": body.student_name,
-                            "status": body.status,
-                            "reason_code": body.reason_code,
-                            "arm_angle_deg": body.arm_angle_deg,
-                            "duration_sec": body.duration_sec,
-                            "queue_pos": podium_entry.queue_position if podium_entry else fallback_qp,
-                            "delta_ms": podium_entry.delta_ms if podium_entry else body.delta_ms,
-                            "timestamp_ms": body.timestamp_ms,
-                            "earned_point": body.earned_point,
-                        }
-                        try:
-                            db.insert_event(event_dict)
-                        except Exception as e:
-                            print(f"[Edge WS] DB error: {e}")
-
-                        active_podium_map = podium_queue.get_podium_map()
-                        ledger = db.get_recitation_ledger(
-                            session_id=session_id,
-                            active_session_required=True,
-                            active_podium_map=active_podium_map,
-                        )
-                        await ConnectionManager.broadcast_event({
-                            "type": "GESTURE_EVENT",
-                            "payload": event_dict,
-                            "ledger": ledger,
-                        })
+                    try:
+                        result = await ingest_edge_event(body, x_edge_key=websocket.headers.get("x-edge-key"))
+                        await websocket.send_text(json.dumps({"type": "EVENT_ACK", **result}))
+                    except HTTPException as error:
+                        await websocket.send_text(json.dumps({
+                            "type": "EVENT_REJECTED", "event_id": body.event_id,
+                            "status": error.status_code, "detail": error.detail,
+                        }))
 
             except Exception as e:
                 print(f"[Edge WS] Error processing message: {e}")

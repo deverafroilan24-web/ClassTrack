@@ -47,6 +47,7 @@ class SeatSchema(BaseModel):
     student_id_number: str = ""
     student_id: Optional[str] = None
     photo_path: Optional[str] = ""
+    face_embedding: Optional[str] = None
     grid_row: Optional[int] = 0
     grid_col: Optional[int] = 0
     x_min: float
@@ -116,6 +117,7 @@ class EdgeEventIngest(BaseModel):
     Schema for gesture events received from remote Camera Nodes.
     Posted to POST /api/events/ingest by the camera-node's api_client.
     """
+    event_id: Optional[str] = None
     section_id: str
     seat_id: str
     student_id: Optional[str] = None
