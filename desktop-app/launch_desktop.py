@@ -76,6 +76,8 @@ class CameraNodeApp:
         self.section_id = section_id
         self.sections: list = []
         self.current_section_idx = 0
+        self._section_lock = threading.RLock()
+        self._active_session_id: Optional[str] = None
 
         # Resolve model weights (supports shared repo-root .pt files)
         try:
@@ -117,24 +119,16 @@ class CameraNodeApp:
         msg_type = msg.get("type", "")
         if msg_type == "EDGE_INIT":
             active = msg.get("active_session")
-            if active:
-                self.vision_worker.set_session_id(active.get("id"))
-                print(f"[CameraNode] Active session: {active.get('id')}")
-            else:
-                self.vision_worker.set_session_id(None)
             incoming = msg.get("sections", [])
+            with self._section_lock:
+                if incoming:
+                    self.sections = incoming
+                    self._match_section_index()
+                sec_name = self._section_name()
             if incoming:
-                self.sections = incoming
-                if not self.section_id or not any(s["id"] == self.section_id for s in self.sections):
-                    self.section_id = self.sections[0]["id"]
-                    self.current_section_idx = 0
-                else:
-                    for i, s in enumerate(self.sections):
-                        if s["id"] == self.section_id:
-                            self.current_section_idx = i
-                            break
-                sec_name = self.sections[self.current_section_idx]["name"] if self.sections else "None"
                 print(f"[CameraNode] Synced {len(self.sections)} section(s) via WebSocket. Active: {sec_name}")
+            self._set_active_session(active)
+            if incoming:
                 self._trigger_sync("RELOAD_SEATS")
             # Apply initial camera settings if present
             c_settings = msg.get("camera_settings")
@@ -144,12 +138,44 @@ class CameraNodeApp:
             c_settings = msg.get("settings", {})
             self._apply_camera_settings(c_settings)
         elif msg_type == "SESSION_STARTED":
-            session_id = msg.get("session_id")
-            self.vision_worker.set_session_id(session_id)
-            print(f"[CameraNode] Session started remotely: {session_id}")
+            self._set_active_session({"id": msg.get("session_id"), "section_id": msg.get("section_id")})
         elif msg_type == "SESSION_STOPPED":
-            self.vision_worker.set_session_id(None)
+            self._set_active_session(None)
             print("[CameraNode] Session stopped remotely.")
+
+    def _section_name(self) -> str:
+        return next((s.get("name", self.section_id) for s in self.sections
+                     if s.get("id") == self.section_id), self.section_id or "None")
+
+    def _match_section_index(self):
+        for i, section in enumerate(self.sections):
+            if section.get("id") == self.section_id:
+                self.current_section_idx = i
+                return
+        if self.sections and not self._active_session_id:
+            self.current_section_idx = 0
+            self.section_id = self.sections[0]["id"]
+
+    def _set_active_session(self, active: Optional[dict]):
+        """Select the session's section and wait for its seats before detecting raises."""
+        session_id = active.get("id") if active else None
+        section_id = active.get("section_id") if active else None
+        with self._section_lock:
+            changed = session_id != self._active_session_id or (section_id and section_id != self.section_id)
+            self._active_session_id = session_id
+            if section_id:
+                self.section_id = section_id
+            self._match_section_index()
+            self.api_client.session_id = session_id
+            if changed or not session_id:
+                self.vision_worker.set_session_id(None)
+                if session_id:
+                    self.vision_worker.set_seats([])
+            selected = self.section_id
+        if session_id:
+            print(f"[CameraNode] Active session: {session_id} (Section: {selected})")
+            if changed:
+                self._trigger_sync("RELOAD_SEATS")
 
     def _apply_camera_settings(self, settings: dict):
         """Apply remote settings from Web Dashboard."""
@@ -174,13 +200,15 @@ class CameraNodeApp:
 
     def _on_vision_event(self, event: GestureEventPayload):
         """Called when the vision worker detects a gesture event."""
-        session_id = self.api_client.session_id
-        if not session_id:
-            return
+        with self._section_lock:
+            session_id = self.vision_worker.session_id
+            if not session_id or session_id != self._active_session_id:
+                return
+            section_id = self.section_id
 
         # Format event payload for the dashboard
         payload = {
-            "section_id": self.section_id,
+            "section_id": section_id,
             "seat_id": event.seat_id,
             "student_name": event.student_name,
             "status": event.status,
@@ -222,17 +250,10 @@ class CameraNodeApp:
         try:
             fetched = self.api_client.fetch_sections()
             if fetched:
-                self.sections = fetched
-                matched = False
-                for i, sec in enumerate(self.sections):
-                    if sec["id"] == self.section_id:
-                        self.current_section_idx = i
-                        matched = True
-                        break
-                if not matched and self.sections:
-                    self.section_id = self.sections[0]["id"]
-                    self.current_section_idx = 0
-                sec_name = self.sections[self.current_section_idx]["name"] if self.sections else "None"
+                with self._section_lock:
+                    self.sections = fetched
+                    self._match_section_index()
+                    sec_name = self._section_name()
                 print(f"[CameraNode] Loaded {len(self.sections)} section(s). Active: {sec_name}")
         except Exception as e:
             print(f"[CameraNode] Could not load sections: {e}")
@@ -240,7 +261,13 @@ class CameraNodeApp:
     def _load_seats(self):
         """Fetch seat zones from dashboard and push to vision worker (runs in background thread)."""
         try:
-            seats_data = self.api_client.fetch_seats(self.section_id)
+            with self._section_lock:
+                section_id = self.section_id
+            if not section_id:
+                return
+            seats_data = self.api_client.fetch_seats(section_id)
+            if seats_data is None:
+                return
             zones = [
                 SeatZone(
                     id=s["id"],
@@ -260,18 +287,28 @@ class CameraNodeApp:
                 )
                 for s in seats_data
             ]
-            self.vision_worker.set_seats(zones)
-            print(f"[CameraNode] Loaded {len(zones)} seat zone(s) for section {self.section_id}")
+            with self._section_lock:
+                if section_id != self.section_id:
+                    self._trigger_sync("RELOAD_SEATS")
+                    return
+                self.vision_worker.set_seats(zones)
+                self.vision_worker.set_session_id(self._active_session_id)
+            print(f"[CameraNode] Loaded {len(zones)} seat zone(s) for section {section_id}")
         except Exception as e:
             print(f"[CameraNode] Could not load seats: {e}")
 
     def _cycle_section(self):
         """Cycle to next section (instant in UI, updates seats in background)."""
-        if not self.sections:
-            return
-        self.current_section_idx = (self.current_section_idx + 1) % len(self.sections)
-        self.section_id = self.sections[self.current_section_idx]["id"]
-        sec_name = self.sections[self.current_section_idx].get("name", "Unknown")
+        with self._section_lock:
+            if self._active_session_id:
+                print("[CameraNode] Section is locked to the active dashboard session.")
+                return
+            if not self.sections:
+                return
+            self.current_section_idx = (self.current_section_idx + 1) % len(self.sections)
+            self.section_id = self.sections[self.current_section_idx]["id"]
+            self.vision_worker.set_seats([])
+            sec_name = self._section_name()
         print(f"[CameraNode] Switched to section: {sec_name}")
         self._trigger_sync("CYCLE")
 
@@ -284,12 +321,11 @@ class CameraNodeApp:
         try:
             if self.api_client.check_connection():
                 print("[CameraNode] Dashboard connection OK")
-                self._load_sections()
-                self._load_seats()
                 active = self.api_client.fetch_active_session()
                 if active:
-                    self.vision_worker.set_session_id(active.get("id"))
-                    print(f"[CameraNode] Active session found: {active.get('id')}")
+                    self._set_active_session(active)
+                self._load_sections()
+                self._load_seats()
             else:
                 print(f"[CameraNode] Dashboard not reachable at {self.dashboard_url} — running in offline mode")
         except Exception as e:
@@ -316,11 +352,10 @@ class CameraNodeApp:
             try:
                 if action == "RELOAD_ALL":
                     print("[CameraNode] Refreshing dashboard data...")
+                    active = self.api_client.fetch_active_session()
+                    self._set_active_session(active)
                     self._load_sections()
                     self._load_seats()
-                    active = self.api_client.fetch_active_session()
-                    if active:
-                        self.vision_worker.set_session_id(active.get("id"))
                 elif action in ("RELOAD_SEATS", "CYCLE"):
                     self._load_seats()
                 elif now - last_check_time >= poll_interval:
@@ -328,11 +363,10 @@ class CameraNodeApp:
                     if not self.api_client.is_connected:
                         if self.api_client.check_connection():
                             print("[CameraNode] Dashboard connected! Syncing...")
+                            active = self.api_client.fetch_active_session()
+                            self._set_active_session(active)
                             self._load_sections()
                             self._load_seats()
-                            active = self.api_client.fetch_active_session()
-                            if active:
-                                self.vision_worker.set_session_id(active.get("id"))
                             poll_interval = 8.0
                         else:
                             poll_interval = min(20.0, poll_interval * 1.5)
@@ -340,6 +374,8 @@ class CameraNodeApp:
                         self._load_sections()
                         if self.sections:
                             self._load_seats()
+                    elif self._active_session_id and self.vision_worker.session_id != self._active_session_id:
+                        self._load_seats()
             except Exception as e:
                 print(f"[CameraNode] Background sync error: {e}")
                 time.sleep(1.0)
@@ -364,7 +400,7 @@ class CameraNodeApp:
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(window_name, 960, 540)
 
-        print("[CameraNode] Press 'Q' to quit | 'C' to cycle sections | 'S' to sync seats | 'R' to reload")
+        print("[CameraNode] Hotkeys: [R] Refresh Cloud/Seats | [F] Refresh Camera Hardware | [C] Next Section | [Q] Quit")
 
         while self._running:
             frame = None
@@ -391,8 +427,11 @@ class CameraNodeApp:
                 print("[CameraNode] Reloading seats in background...")
                 self._trigger_sync("RELOAD_SEATS")
             elif key == ord("r") or key == ord("R"):
-                print("[CameraNode] Full refresh requested in background...")
+                print("[CameraNode] Full refresh requested in background (syncing dashboard & seats)...")
                 self._trigger_sync("RELOAD_ALL")
+            elif key == ord("f") or key == ord("F") or key == ord("k") or key == ord("K"):
+                print("[CameraNode] Resetting and re-scanning camera hardware...")
+                self.vision_worker.restart_camera()
 
             # Check if window was closed
             if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
@@ -407,12 +446,15 @@ class CameraNodeApp:
         print("[CameraNode] Shutdown complete.")
 
     def _draw_hud(self, frame: np.ndarray):
-        """Draw minimal status indicator in top corner — no intrusive debug banners."""
+        """Draw minimal status indicator and section name in top corner."""
         connected = self.api_client.is_connected
         dot_color = (50, 200, 80) if connected else (50, 50, 220)
         cv2.circle(frame, (16, 16), 6, dot_color, -1)
         status_txt = "Online" if connected else "Offline"
-        cv2.putText(frame, status_txt, (28, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (240, 240, 240), 1, cv2.LINE_AA)
+        with self._section_lock:
+            sec_name = self._section_name()
+        hud_text = f"{status_txt}  [{sec_name}]" if sec_name else status_txt
+        cv2.putText(frame, hud_text, (28, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (240, 240, 240), 1, cv2.LINE_AA)
 
 
 def main():

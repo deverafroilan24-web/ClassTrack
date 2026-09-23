@@ -53,6 +53,10 @@ class DashboardAPIClient:
     def session_id(self) -> Optional[str]:
         return self._session_id
 
+    @session_id.setter
+    def session_id(self, val: Optional[str]):
+        self._session_id = val
+
     def _headers(self) -> dict:
         h = {"Content-Type": "application/json"}
         if self.api_key:
@@ -73,7 +77,7 @@ class DashboardAPIClient:
             print(f"[APIClient] Failed to fetch sections: {e}")
             return []
 
-    def fetch_seats(self, section_id: str = "") -> List[Dict[str, Any]]:
+    def fetch_seats(self, section_id: str = "") -> Optional[List[Dict[str, Any]]]:
         """GET /api/seats?section_id=..."""
         try:
             params = {}
@@ -89,7 +93,7 @@ class DashboardAPIClient:
             return resp.json()
         except Exception as e:
             print(f"[APIClient] Failed to fetch seats: {e}")
-            return []
+            return None
 
     def fetch_active_session(self) -> Optional[Dict[str, Any]]:
         """GET /api/sessions/active"""

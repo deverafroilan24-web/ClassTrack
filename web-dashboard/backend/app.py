@@ -64,7 +64,48 @@ TOKEN_LIFETIME_SECONDS = 8 * 60 * 60
 pin_attempts: Dict[str, tuple[int, float]] = {}
 
 event_subscribers: Dict[WebSocket, Optional[str]] = {}
+event_teacher_ids: Dict[WebSocket, str] = {}
 edge_subscribers: Set[WebSocket] = set()
+
+
+def _teacher_id_from_token(token: Optional[str]) -> Optional[str]:
+    payload = _decode_token(token)
+    if not payload or payload.get("role") != "teacher":
+        return None
+    return payload.get("teacher_id", "teacher_master")
+
+
+def _session_belongs_to_teacher(session: Optional[dict], teacher_id: Optional[str]) -> bool:
+    if not session:
+        return False
+    return db.get_section_owner(session.get("section_id")) == teacher_id
+
+
+def _event_visible_to_teacher(event_dict: dict, teacher_id: str) -> bool:
+    event_type = event_dict.get("type", "")
+    payload = event_dict.get("payload") or {}
+    if event_type == "SECTIONS_UPDATED":
+        event_dict["payload"] = [section for section in payload if section.get("teacher_id") == teacher_id or
+                                 (not section.get("teacher_id") and teacher_id == "teacher_master")]
+        return True
+    if event_type == "SESSIONS_CLEARED":
+        return payload.get("teacher_id") == teacher_id
+    if event_type == "SESSION_DELETED":
+        return payload.get("teacher_id") == teacher_id
+    if event_type in {"POINT_AWARDED", "EVENT_DISMISSED"} and payload.get("teacher_id"):
+        return payload["teacher_id"] == teacher_id
+
+    session = payload if event_type in {"SESSION_STARTED", "SESSION_STOPPED"} else None
+    session_id = payload.get("session_id") or payload.get("id")
+    if session is None and session_id:
+        session = db.get_session_details(session_id)
+    if session is None and event_type in {
+        "SESSION_STARTED", "SESSION_STOPPED", "GESTURE_EVENT", "POINT_AWARDED", "EVENT_DISMISSED",
+    }:
+        session = db.get_active_session()
+    if session is not None:
+        return _session_belongs_to_teacher(session, teacher_id)
+    return True
 
 
 class ConnectionManager:
@@ -93,7 +134,14 @@ class ConnectionManager:
         for ws, guest_session_id in list(event_subscribers.items()):
             try:
                 if guest_session_id is None:
-                    await ws.send_text(msg)
+                    teacher_id = event_teacher_ids.get(ws)
+                    if teacher_id:
+                        teacher_event = dict(event_dict)
+                        if not _event_visible_to_teacher(teacher_event, teacher_id):
+                            continue
+                        await ws.send_text(json.dumps(teacher_event))
+                    else:
+                        await ws.send_text(msg)
                 elif event_dict.get("type") == "SESSION_STARTED" and active and guest_session_id != active["id"]:
                     await ws.send_text(json.dumps({"type": "SESSION_STOPPED", "ledger": []}))
                 elif active and guest_session_id == active["id"] and guest_message:
@@ -104,6 +152,7 @@ class ConnectionManager:
                 dead.append(ws)
         for ws in dead:
             event_subscribers.pop(ws, None)
+            event_teacher_ids.pop(ws, None)
 
     @staticmethod
     async def broadcast_to_edge(event_dict: dict):
@@ -521,17 +570,27 @@ async def swap_seats(body: SeatSwapRequest, section_id: Optional[str] = None):
 
 
 @app.get("/api/analytics/heatmap")
-async def get_heatmap(section_id: Optional[str] = None):
+async def get_heatmap(section_id: Optional[str] = None,
+                      x_teacher_token: Optional[str] = Header(default=None)):
+    teacher_id = _teacher_id_from_token(x_teacher_token)
+    if not section_id or db.get_section_owner(section_id) != teacher_id:
+        raise HTTPException(status_code=404, detail="Section not found")
     return db.get_participation_heatmap(section_id=section_id)
 
 
 @app.get("/api/analytics/grades")
-async def get_participation_grades(section_id: str, target: int = 5, weight: float = 100.0):
+async def get_participation_grades(section_id: str, target: int = 5, weight: float = 100.0,
+                                   x_teacher_token: Optional[str] = Header(default=None)):
+    if db.get_section_owner(section_id) != _teacher_id_from_token(x_teacher_token):
+        raise HTTPException(status_code=404, detail="Section not found")
     return db.calculate_participation_grades(section_id=section_id, target_raises=target, weight_percent=weight)
 
 
 @app.get("/api/exports/grades.csv")
-async def export_grades_csv(section_id: str, target: int = 5, weight: float = 100.0):
+async def export_grades_csv(section_id: str, target: int = 5, weight: float = 100.0,
+                            x_teacher_token: Optional[str] = Header(default=None)):
+    if db.get_section_owner(section_id) != _teacher_id_from_token(x_teacher_token):
+        raise HTTPException(status_code=404, detail="Section not found")
     grades = db.calculate_participation_grades(section_id=section_id, target_raises=target, weight_percent=weight)
     import csv
     import io
@@ -588,11 +647,21 @@ async def get_recitation_ledger(session_id: Optional[str] = None, section_id: Op
                                 x_guest_token: Optional[str] = Header(default=None)):
     # If session_id not explicitly provided, default to active session
     teacher = _valid_teacher_token(x_teacher_token)
-    active = db.get_active_session() if teacher else _guest_session(x_guest_token)
+    teacher_id = _teacher_id_from_token(x_teacher_token) if teacher else None
+    active = db.get_active_session(teacher_id=teacher_id) if teacher else _guest_session(x_guest_token)
     if not teacher:
-        if (session_id and session_id != active["id"]) or (section_id and section_id != active["section_id"]):
+        if not active or (session_id and session_id != active["id"]) or (section_id and section_id != active["section_id"]):
             raise HTTPException(status_code=403, detail="This viewing code belongs to another class session")
         section_id = active["section_id"]
+    elif session_id:
+        session = db.get_session_details(session_id, teacher_id=teacher_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        section_id = section_id or session.get("section_id")
+    elif active:
+        section_id = section_id or active.get("section_id")
+    if teacher and section_id and db.get_section_owner(section_id) != teacher_id:
+        raise HTTPException(status_code=404, detail="Section not found")
     target_session_id = session_id if session_id is not None else (active["id"] if active else None)
     active_podium_map = podium_queue.get_podium_map()
     ledger = db.get_recitation_ledger(
@@ -605,52 +674,68 @@ async def get_recitation_ledger(session_id: Optional[str] = None, section_id: Op
 
 
 @app.get("/api/sessions")
-async def get_sessions(section_id: Optional[str] = None, date: Optional[str] = None):
-    return db.get_sessions(section_id=section_id, date_filter=date)
+async def get_sessions(section_id: Optional[str] = None, date: Optional[str] = None,
+                       x_teacher_token: Optional[str] = Header(default=None)):
+    teacher_id = _teacher_id_from_token(x_teacher_token)
+    return db.get_sessions(section_id=section_id, date_filter=date, teacher_id=teacher_id)
 
 
 @app.get("/api/sessions/active", response_model=Optional[SessionResponse])
-async def get_active_session():
-    return db.get_active_session()
+async def get_active_session(x_teacher_token: Optional[str] = Header(default=None)):
+    teacher_id = _teacher_id_from_token(x_teacher_token)
+    return db.get_active_session(teacher_id=teacher_id) if teacher_id else db.get_active_session()
 
 
 @app.get("/api/sessions/active/guest-access")
-async def get_active_guest_access():
-    active = db.get_active_session()
+async def get_active_guest_access(x_teacher_token: Optional[str] = Header(default=None)):
+    active = db.get_active_session(teacher_id=_teacher_id_from_token(x_teacher_token))
     if not active or not active.get("section_id"):
         raise HTTPException(status_code=404, detail="Start a section class session to create a viewing code")
     return {"code": active["guest_code"], "section_id": active["section_id"]}
 
 
 @app.get("/api/sessions/{session_id}")
-async def get_session_details(session_id: str):
-    details = db.get_session_details(session_id)
+async def get_session_details(session_id: str, x_teacher_token: Optional[str] = Header(default=None)):
+    details = db.get_session_details(session_id, teacher_id=_teacher_id_from_token(x_teacher_token))
     if not details:
         raise HTTPException(status_code=404, detail="Session not found")
     return details
 
 
 @app.delete("/api/sessions")
-async def clear_all_sessions(section_id: Optional[str] = None):
-    deleted_count = db.clear_all_sessions(section_id=section_id)
+async def clear_all_sessions(section_id: Optional[str] = None,
+                             x_teacher_token: Optional[str] = Header(default=None)):
+    teacher_id = _teacher_id_from_token(x_teacher_token)
+    if section_id and db.get_section_owner(section_id) != teacher_id:
+        raise HTTPException(status_code=404, detail="Section not found")
+    deleted_count = db.clear_all_sessions(section_id=section_id, teacher_id=teacher_id)
     await ConnectionManager.broadcast_event({
         "type": "SESSIONS_CLEARED",
-        "payload": {"section_id": section_id, "deleted_count": deleted_count},
+        "payload": {"section_id": section_id, "deleted_count": deleted_count, "teacher_id": teacher_id},
     })
     return {"status": "success", "deleted_count": deleted_count}
 
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str):
-    db.delete_session(session_id)
-    await ConnectionManager.broadcast_event({"type": "SESSION_DELETED", "payload": {"session_id": session_id}})
+async def delete_session(session_id: str, x_teacher_token: Optional[str] = Header(default=None)):
+    teacher_id = _teacher_id_from_token(x_teacher_token)
+    session = db.get_session_details(session_id, teacher_id=teacher_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    db.delete_session(session_id, teacher_id=teacher_id)
+    await ConnectionManager.broadcast_event({"type": "SESSION_DELETED", "payload": {"session_id": session_id, "teacher_id": teacher_id}})
     return {"status": "success", "deleted": session_id}
 
 
 @app.post("/api/sessions/start", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
-async def start_session(body: SessionStartRequest):
-    if not body.section_id or body.section_id not in {section["id"] for section in db.get_sections()}:
+async def start_session(body: SessionStartRequest, x_teacher_token: Optional[str] = Header(default=None)):
+    teacher_id = _teacher_id_from_token(x_teacher_token)
+    owned_section_ids = {section["id"] for section in db.get_sections(teacher_id=teacher_id)}
+    if not body.section_id or body.section_id not in owned_section_ids:
         raise HTTPException(status_code=400, detail="Select a valid class section before starting")
+    current_session = db.get_active_session()
+    if current_session and not _session_belongs_to_teacher(current_session, teacher_id):
+        raise HTTPException(status_code=409, detail="Another teacher has an active class session")
     sess = db.start_session(title=body.title, section_id=body.section_id)
     # Clear podium queue for fresh session
     podium_queue.clear()
@@ -666,8 +751,9 @@ async def start_session(body: SessionStartRequest):
 
 
 @app.post("/api/sessions/stop", response_model=Optional[SessionResponse])
-async def stop_session():
-    sess = db.stop_session()
+async def stop_session(x_teacher_token: Optional[str] = Header(default=None)):
+    teacher_id = _teacher_id_from_token(x_teacher_token)
+    sess = db.stop_session(teacher_id=teacher_id)
     podium_queue.clear()
     empty_ledger = db.get_recitation_ledger(session_id=None, active_session_required=True)
     if sess:
@@ -733,26 +819,30 @@ async def delete_seat(seat_id: str, section_id: Optional[str] = None):
 
 
 @app.get("/api/events")
-async def get_events(limit: int = 50):
-    active = db.get_active_session()
-    session_id = active["id"] if active else None
-    return db.get_events(session_id=session_id, limit=limit)
+async def get_events(limit: int = 50, x_teacher_token: Optional[str] = Header(default=None)):
+    active = db.get_active_session(teacher_id=_teacher_id_from_token(x_teacher_token))
+    return db.get_events(session_id=active["id"], limit=limit) if active else []
 
 
 @app.post("/api/events/{event_id}/award", response_model=EventActionResponse)
-async def award_event_point(event_id: str, force: bool = False):
+async def award_event_point(event_id: str, force: bool = False,
+                            x_teacher_token: Optional[str] = Header(default=None)):
     try:
+        teacher_id = _teacher_id_from_token(x_teacher_token)
+        event_context = db.get_event_context(event_id)
+        if not event_context or event_context["teacher_id"] != teacher_id:
+            raise HTTPException(status_code=404, detail="Event not found")
         res = db.award_point(event_id, force_override=force)
-        active = db.get_active_session()
+        active = db.get_active_session(teacher_id=teacher_id)
         active_id = active["id"] if active else None
         active_podium_map = podium_queue.get_podium_map()
         ledger = db.get_recitation_ledger(session_id=active_id, active_session_required=True, active_podium_map=active_podium_map)
         # Notify clients with instant ledger push
         await ConnectionManager.broadcast_event({
             "type": "POINT_AWARDED",
-            "payload": res,
+            "payload": {**res, "teacher_id": teacher_id},
             "ledger": ledger,
-            "seats": db.get_seats(),
+            "seats": db.get_seats(section_id=event_context["section_id"]),
         })
         return res
     except ValueError as ve:
@@ -762,16 +852,20 @@ async def award_event_point(event_id: str, force: bool = False):
 
 
 @app.post("/api/events/{event_id}/dismiss", response_model=EventActionResponse)
-async def dismiss_event(event_id: str):
+async def dismiss_event(event_id: str, x_teacher_token: Optional[str] = Header(default=None)):
     try:
+        teacher_id = _teacher_id_from_token(x_teacher_token)
+        event_context = db.get_event_context(event_id)
+        if not event_context or event_context["teacher_id"] != teacher_id:
+            raise HTTPException(status_code=404, detail="Event not found")
         res = db.dismiss_event(event_id)
-        active = db.get_active_session()
+        active = db.get_active_session(teacher_id=teacher_id)
         active_id = active["id"] if active else None
         active_podium_map = podium_queue.get_podium_map()
         ledger = db.get_recitation_ledger(session_id=active_id, active_session_required=True, active_podium_map=active_podium_map)
         await ConnectionManager.broadcast_event({
             "type": "EVENT_DISMISSED",
-            "payload": res,
+            "payload": {**res, "teacher_id": teacher_id},
             "ledger": ledger,
         })
         return res
@@ -780,11 +874,22 @@ async def dismiss_event(event_id: str):
 
 
 @app.get("/api/exports/session-report.csv")
-async def export_csv(session_id: Optional[str] = None, section_id: Optional[str] = None):
+async def export_csv(session_id: Optional[str] = None, section_id: Optional[str] = None,
+                     x_teacher_token: Optional[str] = Header(default=None)):
+    teacher_id = _teacher_id_from_token(x_teacher_token)
     target_session_id = session_id
     if not target_session_id:
-        active = db.get_active_session()
+        active = db.get_active_session(teacher_id=teacher_id)
         target_session_id = active["id"] if active else None
+    if target_session_id and not db.get_session_details(target_session_id, teacher_id=teacher_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    if target_session_id and not section_id:
+        session = db.get_session_details(target_session_id, teacher_id=teacher_id)
+        section_id = session.get("section_id")
+    if section_id and db.get_section_owner(section_id) != teacher_id:
+        raise HTTPException(status_code=404, detail="Section not found")
+    if not target_session_id and not section_id:
+        raise HTTPException(status_code=404, detail="No session selected")
     csv_text = db.export_session_report_csv(session_id=target_session_id, section_id=section_id)
     filename = f"session-report-{target_session_id or 'all'}.csv"
     return PlainTextResponse(
@@ -795,7 +900,11 @@ async def export_csv(session_id: Optional[str] = None, section_id: Optional[str]
 
 
 @app.get("/api/exports/class-report.csv")
-async def export_class_csv(section_id: Optional[str] = None):
+async def export_class_csv(section_id: Optional[str] = None,
+                           x_teacher_token: Optional[str] = Header(default=None)):
+    teacher_id = _teacher_id_from_token(x_teacher_token)
+    if not section_id or db.get_section_owner(section_id) != teacher_id:
+        raise HTTPException(status_code=404, detail="Section not found")
     csv_text = db.export_class_report_csv(section_id=section_id)
     return PlainTextResponse(
         content=csv_text,
@@ -960,12 +1069,16 @@ async def ws_events(websocket: WebSocket):
             await websocket.close(code=1008)
             return
         event_subscribers[websocket] = None if teacher else guest_session["id"]
+        teacher_id = _teacher_id_from_token(auth_message.get("teacher_token")) if teacher else None
+        if teacher_id:
+            event_teacher_ids[websocket] = teacher_id
         # Send initial snapshot of state
-        active_session = db.get_active_session() if teacher else guest_session
-        sections = db.get_sections() if teacher else [
+        active_session = db.get_active_session(teacher_id=teacher_id) if teacher else guest_session
+        sections = db.get_sections(teacher_id=teacher_id) if teacher else [
             section for section in db.get_sections() if section["id"] == guest_session["section_id"]
         ]
-        seats = db.get_seats() if teacher else []
+        owned_section_ids = {section["id"] for section in sections}
+        seats = [seat for seat in db.get_seats() if seat.get("section_id") in owned_section_ids] if teacher else []
         await websocket.send_text(
             json.dumps(
                 {
@@ -986,8 +1099,10 @@ async def ws_events(websocket: WebSocket):
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
         event_subscribers.pop(websocket, None)
+        event_teacher_ids.pop(websocket, None)
     except Exception:
         event_subscribers.pop(websocket, None)
+        event_teacher_ids.pop(websocket, None)
         try:
             await websocket.close(code=1008)
         except Exception:

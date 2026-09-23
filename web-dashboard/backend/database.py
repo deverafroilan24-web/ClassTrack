@@ -340,7 +340,7 @@ class DatabaseManager:
             """
             params = ()
             if teacher_id:
-                query += " WHERE sec.teacher_id = ? "
+                query += " WHERE COALESCE(sec.teacher_id, 'teacher_master') = ? "
                 params = (teacher_id,)
             query += """
                 GROUP BY sec.id
@@ -358,6 +358,15 @@ class DatabaseManager:
                 (sec_id, name, subject, room, now, teacher_id),
             )
         return {"id": sec_id, "name": name, "subject": subject, "room": room, "created_at": now, "teacher_id": teacher_id}
+
+    def get_section_owner(self, section_id: Optional[str]) -> Optional[str]:
+        if not section_id:
+            return "teacher_master"
+        with self._connect() as conn:
+            row = conn.execute("SELECT teacher_id FROM sections WHERE id = ?", (section_id,)).fetchone()
+            if not row:
+                return None
+            return row["teacher_id"] or "teacher_master"
 
     def delete_section(self, section_id: str) -> bool:
         with self._connect(foreign_keys=False) as conn:
@@ -575,27 +584,32 @@ class DatabaseManager:
         return {"id": session_id, "title": title, "section_id": section_id, "started_at": started_at, "ended_at": None,
                 "guest_code": guest_code}
 
-    def stop_session(self, session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def stop_session(self, session_id: Optional[str] = None, teacher_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         ended_at = _now_iso()
         with self._connect() as conn:
             if session_id:
                 cursor = conn.execute(
-                    "UPDATE sessions SET ended_at = ? WHERE id = ? RETURNING *",
-                    (ended_at, session_id),
+                    "UPDATE sessions SET ended_at = ? WHERE id = ? AND (? IS NULL OR COALESCE((SELECT teacher_id FROM sections WHERE sections.id = sessions.section_id), 'teacher_master') = ?) RETURNING *",
+                    (ended_at, session_id, teacher_id, teacher_id),
                 )
             else:
                 cursor = conn.execute(
-                    "UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL RETURNING *",
-                    (ended_at,),
+                    "UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL AND (? IS NULL OR COALESCE((SELECT teacher_id FROM sections WHERE sections.id = sessions.section_id), 'teacher_master') = ?) RETURNING *",
+                    (ended_at, teacher_id, teacher_id),
                 )
             row = cursor.fetchone()
             if row:
                 return dict(row)
         return None
 
-    def get_active_session(self) -> Optional[Dict[str, Any]]:
+    def get_active_session(self, teacher_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:
-            cursor = conn.execute("SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1")
+            cursor = conn.execute(
+                "SELECT s.* FROM sessions s LEFT JOIN sections sec ON sec.id = s.section_id "
+                "WHERE s.ended_at IS NULL AND (? IS NULL OR COALESCE(sec.teacher_id, 'teacher_master') = ?) "
+                "ORDER BY s.started_at DESC LIMIT 1",
+                (teacher_id, teacher_id),
+            )
             row = cursor.fetchone()
             return dict(row) if row else None
 
@@ -603,6 +617,7 @@ class DatabaseManager:
         self,
         section_id: Optional[str] = None,
         date_filter: Optional[str] = None,
+        teacher_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         with self._connect() as conn:
             q = """
@@ -624,6 +639,9 @@ class DatabaseManager:
             if date_filter:
                 conditions.append("DATE(s.started_at) = DATE(?)")
                 p.append(date_filter)
+            if teacher_id:
+                conditions.append("COALESCE(sec.teacher_id, 'teacher_master') = ?")
+                p.append(teacher_id)
 
             if conditions:
                 q += " WHERE " + " AND ".join(conditions)
@@ -632,16 +650,16 @@ class DatabaseManager:
             cursor = conn.execute(q, p)
             return [dict(r) for r in cursor.fetchall()]
 
-    def get_session_details(self, session_id: str) -> Optional[Dict[str, Any]]:
+    def get_session_details(self, session_id: str, teacher_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 SELECT s.*, sec.name as section_name, sec.subject as section_subject
                 FROM sessions s
                 LEFT JOIN sections sec ON s.section_id = sec.id
-                WHERE s.id = ?
+                WHERE s.id = ? AND (? IS NULL OR COALESCE(sec.teacher_id, 'teacher_master') = ?)
                 """,
-                (session_id,),
+                (session_id, teacher_id, teacher_id),
             )
             row = cursor.fetchone()
             if not row:
@@ -651,20 +669,52 @@ class DatabaseManager:
             sess["ledger"] = ledger
             return sess
 
-    def delete_session(self, session_id: str) -> bool:
-        with self._connect(foreign_keys=False) as conn:
-            conn.execute("DELETE FROM events WHERE session_id = ?;", (session_id,))
-            conn.execute("DELETE FROM sessions WHERE id = ?;", (session_id,))
-        return True
+    def get_event_context(self, event_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(sec.teacher_id, 'teacher_master') AS teacher_id, s.section_id, s.id AS session_id "
+                "FROM events e JOIN sessions s ON s.id = e.session_id "
+                "LEFT JOIN sections sec ON sec.id = s.section_id WHERE e.id = ?",
+                (event_id,),
+            ).fetchone()
+            return dict(row) if row else None
 
-    def clear_all_sessions(self, section_id: Optional[str] = None) -> int:
+    def delete_session(self, session_id: str, teacher_id: Optional[str] = None) -> bool:
         with self._connect(foreign_keys=False) as conn:
-            if section_id:
+            if teacher_id and not conn.execute(
+                "SELECT 1 FROM sessions s LEFT JOIN sections sec ON sec.id = s.section_id "
+                "WHERE s.id = ? AND COALESCE(sec.teacher_id, 'teacher_master') = ?",
+                (session_id, teacher_id),
+            ).fetchone():
+                return False
+            conn.execute("DELETE FROM events WHERE session_id = ?;", (session_id,))
+            cursor = conn.execute("DELETE FROM sessions WHERE id = ?;", (session_id,))
+            return cursor.rowcount > 0
+
+    def clear_all_sessions(self, section_id: Optional[str] = None, teacher_id: Optional[str] = None) -> int:
+        with self._connect(foreign_keys=False) as conn:
+            if teacher_id and section_id:
+                owned = conn.execute(
+                    "SELECT 1 FROM sections WHERE id = ? AND COALESCE(teacher_id, 'teacher_master') = ?",
+                    (section_id, teacher_id),
+                ).fetchone()
+                if not owned:
+                    return 0
                 conn.execute(
                     "DELETE FROM events WHERE session_id IN (SELECT id FROM sessions WHERE section_id = ?);",
                     (section_id,),
                 )
                 cursor = conn.execute("DELETE FROM sessions WHERE section_id = ?;", (section_id,))
+            elif section_id:
+                conn.execute(
+                    "DELETE FROM events WHERE session_id IN (SELECT id FROM sessions WHERE section_id = ?);",
+                    (section_id,),
+                )
+                cursor = conn.execute("DELETE FROM sessions WHERE section_id = ?;", (section_id,))
+            elif teacher_id:
+                owner_filter = "SELECT s.id FROM sessions s LEFT JOIN sections sec ON sec.id = s.section_id WHERE COALESCE(sec.teacher_id, 'teacher_master') = ?"
+                conn.execute(f"DELETE FROM events WHERE session_id IN ({owner_filter});", (teacher_id,))
+                cursor = conn.execute(f"DELETE FROM sessions WHERE id IN ({owner_filter});", (teacher_id,))
             else:
                 conn.execute("DELETE FROM events;")
                 cursor = conn.execute("DELETE FROM sessions;")

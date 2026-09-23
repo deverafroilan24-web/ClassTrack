@@ -62,6 +62,7 @@ class VisionWorker:
         self.seats: List[SeatZone] = []
         self.session_id: Optional[str] = None
         self._running = False
+        self._restart_camera_requested = False
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
 
@@ -118,6 +119,11 @@ class VisionWorker:
     def _handle_event(self, event: GestureEventPayload) -> None:
         if self.on_event:
             self.on_event(event)
+
+    def restart_camera(self) -> None:
+        """Trigger immediate camera device reset and re-scan."""
+        with self._lock:
+            self._restart_camera_requested = True
 
     def set_seats(self, seats: List[SeatZone]) -> None:
         with self._lock:
@@ -181,6 +187,18 @@ class VisionWorker:
 
         while self._running:
             loop_start = time.monotonic()
+
+            with self._lock:
+                if self._restart_camera_requested:
+                    self._restart_camera_requested = False
+                    if cap is not None:
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                        cap = None
+                    last_reconnect_attempt = 0.0
+
             ret, frame = False, None
 
             if cap is not None:
