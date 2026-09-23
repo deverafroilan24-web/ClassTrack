@@ -881,7 +881,7 @@ async def get_seats(section_id: Optional[str] = None,
                     x_teacher_token: Optional[str] = Header(default=None),
                     x_edge_key: Optional[str] = Header(default=None)):
     teacher_id = _teacher_id_from_token(x_teacher_token) if _valid_teacher_token(x_teacher_token) else None
-    if x_edge_key and _validate_edge_key(x_edge_key):
+    if _validate_edge_key(x_edge_key or ""):
         active = db.get_active_session()
         section_id = active.get("section_id") if active else None
         return db.get_seats(section_id=section_id) if section_id else []
