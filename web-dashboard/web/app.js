@@ -1258,33 +1258,50 @@ async function fetchSeats() {
   }
   try {
     const generation = authGeneration;
-    const [seatsRes, studentsRes] = await Promise.all([
-      fetch(`/api/seats?section_id=${encodeURIComponent(sectionId)}`, { cache: "no-store" }),
-      role === "teacher"
-        ? fetch(`/api/sections/${encodeURIComponent(sectionId)}/students`, { cache: "no-store" })
-        : Promise.resolve(null),
-    ]);
-
+    const studentsRequest = role === "teacher"
+      ? fetch(`/api/sections/${encodeURIComponent(sectionId)}/students`, { cache: "no-store" })
+      : null;
+    const seatsRes = await fetch(`/api/seats?section_id=${encodeURIComponent(sectionId)}`, { cache: "no-store" });
     if (!seatsRes.ok) throw new Error(`Seat request failed (${seatsRes.status})`);
-    if (studentsRes && !studentsRes.ok) throw new Error(`Student request failed (${studentsRes.status})`);
-    const [seats, students] = await Promise.all([
-      seatsRes.json(),
-      studentsRes ? studentsRes.json() : Promise.resolve([]),
-    ]);
+    const seats = await seatsRes.json();
     if (
       generation !== authGeneration ||
       requestId !== seatDataRequestId ||
       sectionId !== currentSectionId
-    ) return;
+    ) {
+      if (requestId === seatDataRequestId) seatDataLoadingFor = "";
+      return;
+    }
     currentSeats = seats;
-    if (role === "teacher") currentStudents = students;
+    // Render the authoritative seat response immediately. A failure fetching
+    // the separate student pool must not leave a successfully configured grid
+    // hidden behind the empty-state panel.
+    renderClassroomDesks();
+
+    if (studentsRequest) {
+      try {
+        const studentsRes = await studentsRequest;
+        if (!studentsRes.ok) throw new Error(`Student request failed (${studentsRes.status})`);
+        const students = await studentsRes.json();
+        if (
+          generation !== authGeneration ||
+          requestId !== seatDataRequestId ||
+          sectionId !== currentSectionId
+        ) {
+          if (requestId === seatDataRequestId) seatDataLoadingFor = "";
+          return;
+        }
+        currentStudents = students;
+      } catch (err) {
+        console.warn("Failed to load section student pool:", err);
+      }
+    }
     seatDataLoadingFor = "";
 
     if (seatingViewMode === "heatmap") {
       await fetchHeatmapData();
     }
 
-    renderClassroomDesks();
     renderGuestQueue();
     renderUnassignedStudentTray();
     renderSectionRoster();
@@ -1571,6 +1588,15 @@ window.applyGridDimensions = async function () {
     showToast("Rows and columns must be between 1 and 10", "warning");
     return;
   }
+  if (!currentSectionId) {
+    showToast("Please select a class section first", "warning");
+    return;
+  }
+  if (seatingMutationInProgress) {
+    showToast("A seating update is already in progress", "warning");
+    return;
+  }
+  const sectionId = currentSectionId;
 
   const confirmed = await showConfirmModal({
     title: "Reconfigure Seating Grid",
@@ -1580,21 +1606,38 @@ window.applyGridDimensions = async function () {
     isDanger: false,
   });
   if (!confirmed) return;
+  if (sectionId !== currentSectionId) {
+    showToast("Section changed. Initialize the grid again for the current section.", "warning");
+    return;
+  }
 
+  seatingMutationInProgress = true;
   try {
-    const res = await fetch(`/api/sections/${currentSectionId}/seats/grid`, {
+    const res = await fetch(`/api/sections/${encodeURIComponent(sectionId)}/seats/grid`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ rows, cols }),
     });
-    if (!res.ok) throw new Error("Failed to configure grid");
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(detail || `Failed to configure grid (${res.status})`);
+    }
     const updated = await res.json();
+    if (!Array.isArray(updated) || updated.length !== rows * cols) {
+      throw new Error(`The server returned ${Array.isArray(updated) ? updated.length : 0} of ${rows * cols} desks. Refresh and try again.`);
+    }
+    if (sectionId !== currentSectionId) return;
     currentSeats = updated;
-    showToast(`Configured ${rows} × ${cols} seating grid`, "success");
+    renderClassroomDesks();
+    renderUnassignedStudentTray();
+    renderSectionRoster();
     await fetchSeats();
     fetchRecitationLedger();
+    showToast(`Configured ${rows} × ${cols} seating grid`, "success");
   } catch (err) {
     showToast(err.message, "error");
+  } finally {
+    seatingMutationInProgress = false;
   }
 };
 

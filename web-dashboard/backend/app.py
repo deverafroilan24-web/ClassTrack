@@ -881,13 +881,17 @@ async def get_seats(section_id: Optional[str] = None,
                     x_teacher_token: Optional[str] = Header(default=None),
                     x_edge_key: Optional[str] = Header(default=None)):
     teacher_id = _teacher_id_from_token(x_teacher_token) if _valid_teacher_token(x_teacher_token) else None
+    # A missing EDGE_API_KEY is accepted for local camera deployments. In that
+    # mode _validate_edge_key("") is true, so check authenticated teacher
+    # requests first; otherwise a dashboard fetch is misrouted through the
+    # camera path and returns no seats whenever there is no active session.
+    if teacher_id:
+        return db.get_seats(section_id=section_id, teacher_id=teacher_id)
     if _validate_edge_key(x_edge_key or ""):
         active = db.get_active_session()
         section_id = active.get("section_id") if active else None
         return db.get_seats(section_id=section_id) if section_id else []
-    if not teacher_id:
-        return []
-    return db.get_seats(section_id=section_id, teacher_id=teacher_id)
+    return []
 
 
 @app.put("/api/seats", response_model=List[SeatSchema])
