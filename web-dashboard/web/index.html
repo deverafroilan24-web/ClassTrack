@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ClassTrack — Classroom Participation Monitoring System</title>
+  <link rel="icon" type="image/png" href="/client/desk_icon.png">
   <!-- Tailwind CSS Framework CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -96,10 +97,6 @@
           <span>Camera Settings</span>
         </button>
 
-        <button class="nav-tab w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition" data-view="settings" onclick="showView('settings')">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.636 18.364a9 9 0 010-12.728m12.728 0a9 9 0 010 12.728M9.172 14.828a4 4 0 010-5.656m5.656 0a4 4 0 010 5.656M12 12h.01"/></svg>
-          <span>Edge Nodes</span>
-        </button>
       </nav>
 
       <div class="hidden lg:block px-5 py-3 border-t border-slate-200 text-xs text-slate-400">
@@ -131,13 +128,18 @@
 
           <div class="flex w-full sm:w-auto flex-wrap items-center gap-2 sm:gap-3">
             <!-- Class Section Dropdown Switcher -->
-            <div class="flex items-center space-x-2 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200 min-w-0 flex-1 sm:flex-none">
+            <div id="section-switcher" class="flex items-center space-x-2 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200 min-w-0 flex-1 sm:flex-none">
               <label for="section-select" class="text-xs font-semibold text-slate-600">Class:</label>
               <select id="section-select" class="bg-transparent text-xs font-bold text-brand-900 focus:outline-none cursor-pointer min-w-0 max-w-full flex-1">
                 <!-- Populated dynamically via JS -->
               </select>
             </div>
 
+            <div id="guest-access-panel" class="hidden items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs">
+              <span class="font-semibold text-blue-800">Guest viewing code</span>
+              <code id="guest-access-code" class="font-bold tracking-widest text-blue-950">--------</code>
+              <button type="button" onclick="copyGuestAccessCode()" class="font-semibold text-blue-700 underline">Copy</button>
+            </div>
             <button id="btn-banner-start" onclick="startClassSession()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2 rounded-lg shadow-sm transition flex items-center space-x-1.5">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
               <span>Start Class Session</span>
@@ -149,19 +151,16 @@
           </div>
         </div>
 
-        <section id="guest-dashboard" aria-label="Guest classroom display">
-          <div class="guest-panel guest-podium">
-            <div class="guest-panel-heading"><h2>Live Podium</h2><span>First to raise</span></div>
-            <div id="guest-podium-list" class="guest-podium-list"></div>
+        <section id="guest-queue-view" aria-label="Live participation queue">
+          <div class="guest-queue-heading">
+            <div>
+              <p class="guest-eyebrow">LIVE CLASSROOM</p>
+              <h2>Participation Queue</h2>
+              <p>Students currently raising their hands, in order.</p>
+            </div>
+            <span class="guest-live-indicator"><span></span> Live</span>
           </div>
-          <div class="guest-panel guest-leaderboard">
-            <div class="guest-panel-heading"><h2>Participation Leaderboard</h2><span>Points this session</span></div>
-            <div id="guest-leaderboard-list" class="guest-list"></div>
-          </div>
-          <div class="guest-panel guest-seating">
-            <div class="guest-panel-heading"><h2>Live Seating</h2><span>Raised hands glow green</span></div>
-            <div id="guest-seating-grid" class="guest-seating-grid"></div>
-          </div>
+          <div id="guest-queue-list" class="guest-queue-list" aria-live="polite"></div>
         </section>
 
         <!-- Full-Width Live Recitation Participation Ledger (Video feed removed — runs on Camera Node) -->
@@ -472,65 +471,8 @@
         </div>
       </div>
 
-      <!-- VIEW 5: EDGE CAMERA NODES STATUS -->
-      <div id="view-settings" class="view-panel hidden space-y-6">
-        <div class="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-5">
-          <div>
-            <h2 class="text-base font-bold text-slate-900 mb-1">Edge Camera Nodes</h2>
-            <p class="text-xs text-slate-500">Camera Nodes run locally on the classroom PC and stream detected gesture events to this dashboard in real-time via WebSocket.</p>
-          </div>
-
-          <!-- Connection Status -->
-          <div class="bg-slate-50 border border-slate-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
-            <div class="flex items-center space-x-3">
-              <div id="edge-status-dot" class="w-3 h-3 rounded-full bg-slate-300 animate-pulse"></div>
-              <div>
-                <span class="text-sm font-bold text-slate-800" id="edge-status-text">No Camera Nodes Connected</span>
-                <p class="text-xs text-slate-500" id="edge-status-desc">Start the Camera Node desktop app on the classroom PC to begin receiving live gesture events.</p>
-              </div>
-            </div>
-            <button onclick="fetchEdgeStatus()" class="text-xs text-slate-500 hover:text-slate-800 font-medium px-3 py-1.5 bg-white rounded-lg border border-slate-200 hover:bg-slate-50 transition">Refresh</button>
-          </div>
-
-          <!-- Architecture Diagram -->
-          <div class="border border-slate-200 rounded-xl p-5 space-y-3">
-            <h3 class="text-sm font-bold text-slate-800">System Architecture</h3>
-            <div class="flex flex-wrap items-center justify-center gap-3 py-4" id="architecture-flow">
-              <div class="text-center space-y-1.5">
-                <div class="w-20 h-20 bg-brand-50 border-2 border-brand-300 rounded-xl flex items-center justify-center">
-                  <svg class="w-8 h-8 text-brand-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
-                </div>
-                <div class="text-[11px] font-bold text-slate-800">Camera Node</div>
-                <div class="text-[10px] text-slate-500">Desktop PC<br>YOLO + OpenCV</div>
-              </div>
-              <div class="flex flex-col items-center space-y-1">
-                <svg class="w-8 h-4 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 32 16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2 8h20m0 0l-6-6m6 6l-6 6"/></svg>
-                <span class="text-[10px] font-bold text-emerald-600">Events via WS/REST</span>
-              </div>
-              <div class="text-center space-y-1.5">
-                <div class="w-20 h-20 bg-emerald-50 border-2 border-emerald-300 rounded-xl flex items-center justify-center">
-                  <svg class="w-8 h-8 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"/></svg>
-                </div>
-                <div class="text-[11px] font-bold text-slate-800">Web Dashboard</div>
-                <div class="text-[10px] text-slate-500">Cloud / Local<br>FastAPI + SQLite</div>
-              </div>
-              <div class="flex flex-col items-center space-y-1">
-                <svg class="w-8 h-4 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 32 16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2 8h20m0 0l-6-6m6 6l-6 6"/></svg>
-                <span class="text-[10px] font-bold text-brand-600">WebSocket Push</span>
-              </div>
-              <div class="text-center space-y-1.5">
-                <div class="w-20 h-20 bg-slate-50 border-2 border-slate-300 rounded-xl flex items-center justify-center">
-                  <svg class="w-8 h-8 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
-                </div>
-                <div class="text-[11px] font-bold text-slate-800">Teacher Browser</div>
-                <div class="text-[10px] text-slate-500">Any Device<br>Live Ledger</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- VIEW 6: CAMERA SETTINGS (Remote Control for Edge Camera Node) -->
+               </div>
+      <!-- CAMERA SETTINGS (Remote Control for Edge Camera Node) -->
       <div id="view-camera" class="view-panel hidden space-y-6">
         <div class="bg-white border border-slate-200 rounded-xl p-6 shadow-xs space-y-6">
           <div class="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-100">
@@ -575,25 +517,8 @@
             </div>
           </div>
 
-          <!-- Section 3: Detection Confidence Threshold -->
-          <div class="space-y-3">
-            <div class="flex items-center justify-between">
-              <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Detection Confidence Threshold</h3>
-              <span id="cam-confidence-label" class="text-xs font-bold text-brand-700">0.50</span>
-            </div>
-            <div class="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
-              <input type="range" id="cam-confidence-slider" min="0.25" max="0.85" step="0.05" value="0.50" oninput="onConfidenceSliderChange(this.value)" class="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-brand-700">
-              <div class="flex justify-between text-[11px] text-slate-400 font-medium">
-                <span>0.25 (Lenient / Higher Recall)</span>
-                <span>0.50 (Recommended)</span>
-                <span>0.85 (Strict / Fewer False Positives)</span>
-              </div>
-            </div>
-          </div>
-
           <!-- Footer Action Button -->
           <div class="pt-4 border-t border-slate-100 flex items-center justify-between">
-            <span class="text-xs text-slate-400">Changes apply immediately to all active Camera Nodes.</span>
             <button onclick="saveCameraSettings()" class="bg-brand-700 hover:bg-brand-800 text-white font-bold text-xs px-5 py-2.5 rounded-lg shadow-sm transition flex items-center space-x-1.5">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
               <span>Sync All Camera Nodes</span>
@@ -616,9 +541,9 @@
           <span class="block text-base font-bold text-brand-900">Login as Teacher</span>
           <span class="block text-xs text-slate-600 mt-1">Manage classes, attendance, points, and exports.</span>
         </button>
-        <button type="button" onclick="enterGuestMode()" class="text-left rounded-xl border-2 border-slate-200 bg-slate-50 p-4 hover:border-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-700">
+        <button type="button" onclick="showGuestLogin()" class="text-left rounded-xl border-2 border-slate-200 bg-slate-50 p-4 hover:border-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-700">
           <span class="block text-base font-bold text-slate-900">Continue as Guest</span>
-          <span class="block text-xs text-slate-600 mt-1">View the live podium, seating, and leaderboard.</span>
+          <span class="block text-xs text-slate-600 mt-1">Enter your class viewing code to see the live queue.</span>
         </button>
       </div>
       <form id="teacher-login-form" onsubmit="submitTeacherLogin(event)" class="hidden mt-6 space-y-4">
@@ -628,6 +553,15 @@
         <div class="flex gap-2">
           <button type="button" onclick="showWelcomeChoices()" class="flex-1 rounded-lg border border-slate-300 px-4 py-2.5 font-semibold text-slate-700">Back</button>
           <button id="teacher-login-submit" type="submit" class="flex-1 rounded-lg bg-brand-700 px-4 py-2.5 font-semibold text-white hover:bg-brand-800">Unlock Teacher Mode</button>
+        </div>
+      </form>
+      <form id="guest-login-form" onsubmit="submitGuestLogin(event)" class="hidden mt-6 space-y-4">
+        <label for="guest-code-input" class="block text-sm font-semibold text-slate-800">Class viewing code</label>
+        <input id="guest-code-input" type="text" autocapitalize="characters" autocomplete="off" required maxlength="32" class="w-full rounded-lg border border-slate-300 px-4 py-3 text-lg font-bold tracking-widest uppercase focus:outline-none focus:ring-2 focus:ring-brand-700" placeholder="Code from your teacher">
+        <p id="guest-login-error" role="alert" class="hidden text-sm font-medium text-rose-700"></p>
+        <div class="flex gap-2">
+          <button type="button" onclick="showWelcomeChoices()" class="flex-1 rounded-lg border border-slate-300 px-4 py-2.5 font-semibold text-slate-700">Back</button>
+          <button id="guest-login-submit" type="submit" class="flex-1 rounded-lg bg-brand-700 px-4 py-2.5 font-semibold text-white hover:bg-brand-800">View Live Queue</button>
         </div>
       </form>
     </div>
@@ -901,7 +835,7 @@
     </div>
   </div>
 
-  <script src="/client/app.js?v=3.0"></script>
-  <link rel="stylesheet" href="/client/style.css?v=3.0">
+  <script src="/client/app.js?v=3.1"></script>
+  <link rel="stylesheet" href="/client/style.css?v=3.1">
 </body>
 </html>

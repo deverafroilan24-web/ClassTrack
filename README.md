@@ -43,7 +43,7 @@ Set `TEACHER_PIN` and `AUTH_SECRET` in `web-dashboard/.env` or in the Render ser
 
 Set `EDGE_API_KEY` to the same private value in the web dashboard environment and `desktop-app/.env`. Camera event ingestion and the edge WebSocket reject connections without this key. The database creates the `app_settings` auth table automatically on startup in SQLite or Supabase PostgreSQL.
 
-The welcome screen offers Teacher Mode and Guest Mode. Guest Mode can watch the live podium, seating, and leaderboard. Only Teacher Mode can change records, award points, or download reports.
+The welcome screen offers Teacher Mode and Guest Mode. After starting a section's class session, the teacher can copy its **Guest viewing code** from the Live Class header and share it with that class or projector. Guests enter the code to see only that live session's participation queue. The code expires when the session ends or a different class starts; another section's ledger and seats remain inaccessible. Anyone who receives a valid code can view that session, so share it only with the intended class. Only Teacher Mode can change records, award points, or download reports.
 
 Double-click **`START_ALL.bat`**. This starts:
 1. **Web Dashboard** at `http://127.0.0.1:8000` (browser opens automatically).

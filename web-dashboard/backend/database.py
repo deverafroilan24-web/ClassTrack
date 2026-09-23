@@ -207,6 +207,13 @@ class DatabaseManager:
         timestamp_type = "TIMESTAMPTZ" if self.is_postgres else "TEXT"
         pin = os.getenv("TEACHER_PIN") or "1234"
         with self._connect() as conn:
+            if self.is_postgres:
+                conn.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS guest_code TEXT")
+            elif "guest_code" not in {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}:
+                conn.execute("ALTER TABLE sessions ADD COLUMN guest_code TEXT")
+            for session in conn.execute("SELECT id FROM sessions WHERE ended_at IS NULL AND guest_code IS NULL").fetchall():
+                conn.execute("UPDATE sessions SET guest_code = ? WHERE id = ?",
+                             (secrets.token_hex(4).upper(), session["id"]))
             conn.execute(
                 f"CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at {timestamp_type} NOT NULL)"
             )
@@ -548,13 +555,15 @@ class DatabaseManager:
     def start_session(self, title: str = "Classroom Recitation Session", section_id: Optional[str] = None) -> Dict[str, Any]:
         session_id = f"sess_{int(time.time())}_{uuid.uuid4().hex[:6]}"
         started_at = _now_iso()
+        guest_code = secrets.token_hex(4).upper()
         with self._connect() as conn:
             conn.execute("UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL", (started_at,))
             conn.execute(
-                "INSERT INTO sessions (id, title, section_id, started_at, ended_at) VALUES (?, ?, ?, ?, NULL)",
-                (session_id, title, section_id, started_at),
+                "INSERT INTO sessions (id, title, section_id, started_at, ended_at, guest_code) VALUES (?, ?, ?, ?, NULL, ?)",
+                (session_id, title, section_id, started_at, guest_code),
             )
-        return {"id": session_id, "title": title, "section_id": section_id, "started_at": started_at, "ended_at": None}
+        return {"id": session_id, "title": title, "section_id": section_id, "started_at": started_at, "ended_at": None,
+                "guest_code": guest_code}
 
     def stop_session(self, session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         ended_at = _now_iso()
@@ -1025,13 +1034,14 @@ class DatabaseManager:
                     st.name as student_name,
                     st.student_id_number,
                     st.photo_path,
-                    s.label as assigned_seat_label,
-                    COUNT(DISTINCT e.id) as total_raises,
-                    COALESCE(SUM(CASE WHEN e.earned_point = 1 THEN 1 ELSE 0 END), 0) as total_points,
-                    COALESCE(SUM(CASE WHEN e.verification_status = 'SEAT_MISMATCH' THEN 1 ELSE 0 END), 0) as seat_mismatches
+                    MAX(s.label) as assigned_seat_label,
+                    COUNT(DISTINCT CASE WHEN e.status = 'VALID' AND e.reason_code = 'VALID_HAND_RAISE' THEN e.id END) as total_raises,
+                    COUNT(DISTINCT CASE WHEN e.earned_point = 1 THEN e.id END) as total_points,
+                    COUNT(DISTINCT CASE WHEN e.verification_status = 'SEAT_MISMATCH' THEN e.id END) as seat_mismatches
                 FROM students st
-                LEFT JOIN seats s ON st.id = s.student_id
-                LEFT JOIN events e ON (s.id = e.seat_id OR st.name = e.student_name)
+                LEFT JOIN seats s ON st.id = s.student_id AND s.section_id = st.section_id
+                LEFT JOIN events e ON (s.id = e.seat_id OR (s.id IS NULL AND st.name = e.student_name))
+                    AND e.session_id IN (SELECT id FROM sessions WHERE section_id = st.section_id)
                 WHERE st.section_id = ?
                 GROUP BY st.id
                 ORDER BY st.name ASC

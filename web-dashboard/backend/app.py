@@ -63,7 +63,7 @@ AUTH_SECRET = (os.getenv("AUTH_SECRET") or secrets.token_urlsafe(32)).encode()
 TOKEN_LIFETIME_SECONDS = 8 * 60 * 60
 pin_attempts: Dict[str, tuple[int, float]] = {}
 
-event_subscribers: Set[WebSocket] = set()
+event_subscribers: Dict[WebSocket, Optional[str]] = {}
 edge_subscribers: Set[WebSocket] = set()
 
 
@@ -76,14 +76,34 @@ class ConnectionManager:
         if public_event.get("type") == "STUDENTS_UPDATED":
             public_event.pop("payload", None)
         msg = json.dumps(public_event)
+        active = db.get_active_session()
+        guest_message = None
+        if active and any(session_id is not None for session_id in event_subscribers.values()) and event_dict.get("type") in {
+            "GESTURE_EVENT", "POINT_AWARDED", "EVENT_DISMISSED", "SEATS_UPDATED",
+            "STUDENTS_UPDATED", "SECTIONS_UPDATED",
+        }:
+            guest_message = json.dumps({
+                "type": event_dict["type"],
+                "ledger": _guest_safe(db.get_recitation_ledger(
+                    session_id=active["id"], section_id=active["section_id"],
+                    active_session_required=True, active_podium_map=podium_queue.get_podium_map(),
+                )),
+            })
         dead = []
-        for ws in list(event_subscribers):
+        for ws, guest_session_id in list(event_subscribers.items()):
             try:
-                await ws.send_text(msg)
+                if guest_session_id is None:
+                    await ws.send_text(msg)
+                elif event_dict.get("type") == "SESSION_STARTED" and active and guest_session_id != active["id"]:
+                    await ws.send_text(json.dumps({"type": "SESSION_STOPPED", "ledger": []}))
+                elif active and guest_session_id == active["id"] and guest_message:
+                    await ws.send_text(guest_message)
+                elif event_dict.get("type") == "SESSION_STOPPED" and event_dict.get("payload", {}).get("id") == guest_session_id:
+                    await ws.send_text(json.dumps({"type": "SESSION_STOPPED", "ledger": []}))
             except Exception:
                 dead.append(ws)
         for ws in dead:
-            event_subscribers.discard(ws)
+            event_subscribers.pop(ws, None)
 
     @staticmethod
     async def broadcast_to_edge(event_dict: dict):
@@ -131,6 +151,10 @@ class PinRequest(BaseModel):
     pin: str = Field(min_length=1, max_length=128)
 
 
+class GuestCodeRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=32)
+
+
 def _teacher_pin_matches(pin: str) -> bool:
     return verify_pin_hash(pin, db.get_setting("teacher_pin_hash") or "")
 
@@ -144,19 +168,43 @@ def _create_teacher_token() -> str:
     return f"{encoded.decode()}.{base64.urlsafe_b64encode(signature).rstrip(b'=').decode()}"
 
 
-def _valid_teacher_token(token: Optional[str]) -> bool:
+def _decode_token(token: Optional[str]) -> Optional[dict]:
     if not token:
-        return False
+        return None
     try:
         encoded, signature = token.split(".", 1)
         expected = hmac.new(AUTH_SECRET, encoded.encode(), hashlib.sha256).digest()
         actual = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
         payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
-        return (hmac.compare_digest(expected, actual) and payload.get("role") == "teacher"
-                and payload.get("pin_version") == PIN_VERSION
-                and int(payload.get("exp", 0)) > time.time())
+        if isinstance(payload, dict) and hmac.compare_digest(expected, actual) and int(payload.get("exp", 0)) > time.time():
+            return payload
     except (ValueError, TypeError, KeyError, UnicodeError, binascii.Error):
-        return False
+        pass
+    return None
+
+
+def _valid_teacher_token(token: Optional[str]) -> bool:
+    payload = _decode_token(token)
+    return bool(payload and payload.get("role") == "teacher" and payload.get("pin_version") == PIN_VERSION)
+
+
+def _create_guest_token(session: dict) -> str:
+    payload = json.dumps({"role": "guest", "session_id": session["id"],
+                          "section_id": session["section_id"],
+                          "exp": int(time.time()) + TOKEN_LIFETIME_SECONDS}, separators=(",", ":")).encode()
+    encoded = base64.urlsafe_b64encode(payload).rstrip(b"=")
+    signature = hmac.new(AUTH_SECRET, encoded, hashlib.sha256).digest()
+    return f"{encoded.decode()}.{base64.urlsafe_b64encode(signature).rstrip(b'=').decode()}"
+
+
+def _guest_session(token: Optional[str]) -> Optional[dict]:
+    payload = _decode_token(token)
+    if not payload or payload.get("role") != "guest":
+        return None
+    active = db.get_active_session()
+    if active and active.get("section_id") and payload.get("session_id") == active["id"] and payload.get("section_id") == active["section_id"]:
+        return active
+    return None
 
 
 def _teacher_or_edge(request: Request) -> bool:
@@ -166,7 +214,7 @@ def _teacher_or_edge(request: Request) -> bool:
 
 def _guest_safe(value):
     """Remove private student fields from every public REST/WS payload."""
-    hidden = {"student_id_number", "student_id", "photo_path", "face_embedding", "students",
+    hidden = {"student_id_number", "student_id", "photo_path", "face_embedding", "students", "guest_code",
               "latest_event_id", "face_similarity", "verification_status", "event_id"}
     if isinstance(value, dict):
         return {key: _guest_safe(item) for key, item in value.items() if key not in hidden}
@@ -182,15 +230,22 @@ async def enforce_teacher_access(request: Request, call_next):
     if path.startswith("/uploads/") and not _teacher_or_edge(request):
         return JSONResponse({"detail": "Teacher authentication required"}, status_code=401)
     if path.startswith("/api/"):
-        public_get = {"/api/sections", "/api/seats", "/api/sessions/active",
-                      "/api/recitation/ledger", "/api/edge/status"}
-        public_post = {"/api/auth/verify-pin", "/api/events/ingest"}
+        guest_get = {"/api/sections", "/api/sessions/active", "/api/recitation/ledger"}
+        public_get = {"/api/edge/status", "/api/auth/guest-session"}
+        public_post = {"/api/auth/verify-pin", "/api/auth/guest", "/api/events/ingest"}
         if method == "POST" and path == "/api/events/ingest":
             if not EDGE_API_KEY:
                 return JSONResponse({"detail": "EDGE_API_KEY is not configured"}, status_code=503)
             if not _validate_edge_key(request.headers.get("x-edge-key", "")):
                 return JSONResponse({"detail": "Invalid or missing X-Edge-Key"}, status_code=401)
         if method == "GET" and path in public_get:
+            pass
+        elif method == "GET" and path in guest_get and (
+            _valid_teacher_token(request.headers.get("x-teacher-token"))
+            or _guest_session(request.headers.get("x-guest-token"))
+        ):
+            pass
+        elif method == "GET" and path == "/api/seats" and _teacher_or_edge(request):
             pass
         elif method == "GET" and path == "/api/auth/session":
             pass
@@ -228,6 +283,30 @@ async def get_auth_session(x_teacher_token: Optional[str] = Header(default=None)
     return {"authenticated": True, "role": "teacher"}
 
 
+@app.post("/api/auth/guest")
+async def verify_guest_code(body: GuestCodeRequest, request: Request):
+    client = f"guest:{request.client.host if request.client else 'unknown'}"
+    count, reset_at = pin_attempts.get(client, (0, 0.0))
+    if time.monotonic() >= reset_at:
+        count, reset_at = 0, time.monotonic() + 300
+    if count >= 5:
+        raise HTTPException(status_code=429, detail="Too many attempts. Try again in five minutes.")
+    active = db.get_active_session()
+    if not active or not active.get("section_id") or not active.get("guest_code") or not secrets.compare_digest(body.code.strip().upper(), active["guest_code"]):
+        pin_attempts[client] = (count + 1, reset_at)
+        raise HTTPException(status_code=401, detail="Invalid viewing code or no live session")
+    pin_attempts.pop(client, None)
+    return {"authenticated": True, "token": _create_guest_token(active), "section_id": active["section_id"]}
+
+
+@app.get("/api/auth/guest-session")
+async def get_guest_auth_session(x_guest_token: Optional[str] = Header(default=None)):
+    active = _guest_session(x_guest_token)
+    if not active:
+        raise HTTPException(status_code=401, detail="Viewing code expired")
+    return {"authenticated": True, "section_id": active["section_id"]}
+
+
 def _validate_edge_key(provided_key: str) -> bool:
     return bool(EDGE_API_KEY) and secrets.compare_digest(provided_key or "", EDGE_API_KEY)
 
@@ -244,8 +323,13 @@ def _require_edge_auth(x_edge_key: Optional[str] = None) -> None:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/sections", response_model=List[SectionResponse])
-async def get_sections():
-    return db.get_sections()
+async def get_sections(x_teacher_token: Optional[str] = Header(default=None),
+                       x_guest_token: Optional[str] = Header(default=None)):
+    sections = db.get_sections()
+    if _valid_teacher_token(x_teacher_token):
+        return sections
+    active = _guest_session(x_guest_token)
+    return [section for section in sections if section["id"] == active["section_id"]]
 
 
 @app.post("/api/sections", response_model=SectionResponse, status_code=status.HTTP_201_CREATED)
@@ -461,9 +545,15 @@ async def register_student(section_id: str, body: StudentRegisterRequest):
 
 @app.get("/api/recitation/ledger")
 async def get_recitation_ledger(session_id: Optional[str] = None, section_id: Optional[str] = None,
-                                x_teacher_token: Optional[str] = Header(default=None)):
+                                x_teacher_token: Optional[str] = Header(default=None),
+                                x_guest_token: Optional[str] = Header(default=None)):
     # If session_id not explicitly provided, default to active session
-    active = db.get_active_session()
+    teacher = _valid_teacher_token(x_teacher_token)
+    active = db.get_active_session() if teacher else _guest_session(x_guest_token)
+    if not teacher:
+        if (session_id and session_id != active["id"]) or (section_id and section_id != active["section_id"]):
+            raise HTTPException(status_code=403, detail="This viewing code belongs to another class session")
+        section_id = active["section_id"]
     target_session_id = session_id if session_id is not None else (active["id"] if active else None)
     active_podium_map = podium_queue.get_podium_map()
     ledger = db.get_recitation_ledger(
@@ -472,7 +562,7 @@ async def get_recitation_ledger(session_id: Optional[str] = None, section_id: Op
         active_session_required=True,
         active_podium_map=active_podium_map,
     )
-    return ledger if _valid_teacher_token(x_teacher_token) else _guest_safe(ledger)
+    return ledger if teacher else _guest_safe(ledger)
 
 
 @app.get("/api/sessions")
@@ -483,6 +573,14 @@ async def get_sessions(section_id: Optional[str] = None, date: Optional[str] = N
 @app.get("/api/sessions/active", response_model=Optional[SessionResponse])
 async def get_active_session():
     return db.get_active_session()
+
+
+@app.get("/api/sessions/active/guest-access")
+async def get_active_guest_access():
+    active = db.get_active_session()
+    if not active or not active.get("section_id"):
+        raise HTTPException(status_code=404, detail="Start a section class session to create a viewing code")
+    return {"code": active["guest_code"], "section_id": active["section_id"]}
 
 
 @app.get("/api/sessions/{session_id}")
@@ -512,6 +610,8 @@ async def delete_session(session_id: str):
 
 @app.post("/api/sessions/start", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
 async def start_session(body: SessionStartRequest):
+    if not body.section_id or body.section_id not in {section["id"] for section in db.get_sections()}:
+        raise HTTPException(status_code=400, detail="Select a valid class section before starting")
     sess = db.start_session(title=body.title, section_id=body.section_id)
     # Clear podium queue for fresh session
     podium_queue.clear()
@@ -541,10 +641,7 @@ async def stop_session():
 async def get_seats(section_id: Optional[str] = None,
                     x_teacher_token: Optional[str] = Header(default=None),
                     x_edge_key: Optional[str] = Header(default=None)):
-    seats = db.get_seats(section_id=section_id)
-    if _valid_teacher_token(x_teacher_token) or _validate_edge_key(x_edge_key or ""):
-        return seats
-    return _guest_safe(seats)
+    return db.get_seats(section_id=section_id)
 
 
 @app.put("/api/seats", response_model=List[SeatSchema])
@@ -684,6 +781,8 @@ async def ingest_edge_event(body: EdgeEventIngest, x_edge_key: Optional[str] = H
     active = db.get_active_session()
     if not active:
         raise HTTPException(status_code=409, detail="No active session — start a session first")
+    if body.section_id != active["section_id"]:
+        raise HTTPException(status_code=409, detail="Camera event belongs to another class section")
 
     session_id = active["id"]
 
@@ -814,18 +913,26 @@ async def get_edge_status():
 @app.websocket("/ws/events")
 async def ws_events(websocket: WebSocket):
     await websocket.accept()
-    event_subscribers.add(websocket)
     try:
+        auth_message = json.loads(await asyncio.wait_for(websocket.receive_text(), timeout=5))
+        teacher = _valid_teacher_token(auth_message.get("teacher_token"))
+        guest_session = None if teacher else _guest_session(auth_message.get("guest_token"))
+        if not teacher and not guest_session:
+            await websocket.close(code=1008)
+            return
+        event_subscribers[websocket] = None if teacher else guest_session["id"]
         # Send initial snapshot of state
-        active_session = db.get_active_session()
-        sections = db.get_sections()
-        seats = db.get_seats()
+        active_session = db.get_active_session() if teacher else guest_session
+        sections = db.get_sections() if teacher else [
+            section for section in db.get_sections() if section["id"] == guest_session["section_id"]
+        ]
+        seats = db.get_seats() if teacher else []
         await websocket.send_text(
             json.dumps(
                 {
                     "type": "INITIAL_STATE",
                     "payload": {
-                        "active_session": active_session,
+                        "active_session": _guest_safe(active_session),
                         "sections": sections,
                         "seats": _guest_safe(seats),
                         "edge_nodes": len(edge_subscribers),
@@ -839,9 +946,13 @@ async def ws_events(websocket: WebSocket):
             if data == "ping":
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
-        event_subscribers.discard(websocket)
+        event_subscribers.pop(websocket, None)
     except Exception:
-        event_subscribers.discard(websocket)
+        event_subscribers.pop(websocket, None)
+        try:
+            await websocket.close(code=1008)
+        except Exception:
+            pass
 
 
 @app.websocket("/ws/edge")
@@ -885,6 +996,8 @@ async def ws_edge(websocket: WebSocket):
                     # Reuse the ingest logic
                     active = db.get_active_session()
                     if active:
+                        if body.section_id != active["section_id"]:
+                            continue
                         session_id = active["id"]
                         if body.status == "VALID" and body.reason_code == "VALID_HAND_RAISE":
                             podium_queue.register_raise(
