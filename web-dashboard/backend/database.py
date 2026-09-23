@@ -340,7 +340,7 @@ class DatabaseManager:
             """
             params = ()
             if teacher_id:
-                query += " WHERE (sec.teacher_id IS NULL OR sec.teacher_id = ?) "
+                query += " WHERE sec.teacher_id = ? "
                 params = (teacher_id,)
             query += """
                 GROUP BY sec.id
@@ -468,7 +468,7 @@ class DatabaseManager:
             """
             params: List[Any] = []
             if section_id:
-                query += " WHERE st.section_id = ? OR st.section_id IS NULL"
+                query += " WHERE st.section_id = ?"
                 params.append(section_id)
             query += " GROUP BY st.id, st.section_id, st.name, st.student_id_number, st.photo_path, st.face_embedding, st.created_at, s.id, s.label ORDER BY st.name ASC"
 
