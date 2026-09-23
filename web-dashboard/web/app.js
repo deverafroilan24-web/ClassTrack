@@ -50,6 +50,10 @@ let guestAccessCode = "";
 let guestAccessSessionId = "";
 let role = "guest";
 let authGeneration = 0;
+let seatDataRequestId = 0;
+let ledgerRequestId = 0;
+let seatingMutationInProgress = false;
+let seatDataLoadingFor = "";
 let eventsSocket = null;
 let socketReconnectTimer = null;
 
@@ -668,28 +672,36 @@ function populateSectionDropdown() {
 
 if (sectionSelect) {
   sectionSelect.addEventListener("change", async (e) => {
-    currentSectionId = e.target.value;
-    currentReportsSectionId = e.target.value;
-    const seatingSectionSelect = document.getElementById("seating-section-select");
-    if (seatingSectionSelect) seatingSectionSelect.value = currentSectionId;
-    const reportsFilter = document.getElementById("reports-section-select");
-    if (reportsFilter) reportsFilter.value = currentSectionId;
-    updateSectionUI();
-    await fetchSeats();
-    fetchRecitationLedger();
+    await selectClassSection(e.target.value);
   });
 }
 
 window.onSeatingSectionChange = async function (e) {
-  currentSectionId = e.target.value;
-  currentReportsSectionId = e.target.value;
-  if (sectionSelect) sectionSelect.value = currentSectionId;
-  const reportsFilter = document.getElementById("reports-section-select");
-  if (reportsFilter) reportsFilter.value = currentSectionId;
-  updateSectionUI();
-  await fetchSeats();
-  fetchRecitationLedger();
+  await selectClassSection(e.target.value);
 };
+
+async function selectClassSection(sectionId) {
+  if (sectionId === currentSectionId) {
+    await Promise.all([fetchSeats(), fetchRecitationLedger()]);
+    return;
+  }
+  currentSectionId = sectionId;
+  currentReportsSectionId = sectionId;
+  currentSeats = [];
+  currentStudents = [];
+  currentLedger = [];
+  if (sectionSelect) sectionSelect.value = sectionId;
+  const seatingSectionSelect = document.getElementById("seating-section-select");
+  if (seatingSectionSelect) seatingSectionSelect.value = sectionId;
+  const reportsFilter = document.getElementById("reports-section-select");
+  if (reportsFilter) reportsFilter.value = sectionId;
+  updateSectionUI();
+  renderSectionsCards();
+  renderClassroomDesks();
+  renderSectionRoster();
+  renderRecitationLedger();
+  await Promise.all([fetchSeats(), fetchRecitationLedger()]);
+}
 
 window.onReportsSectionChange = function (e) {
   currentReportsSectionId = e.target.value;
@@ -735,12 +747,7 @@ function renderSectionsCards() {
     }`;
     card.onclick = (e) => {
       if (e.target.closest(".btn-delete-section")) return;
-      currentSectionId = sec.id;
-      if (sectionSelect) sectionSelect.value = sec.id;
-      updateSectionUI();
-      renderSectionsCards();
-      fetchSeats();
-      fetchRecitationLedger();
+      selectClassSection(sec.id);
     };
     card.innerHTML = `
       <!-- Top Row: Delete action on hover & Active badge -->
@@ -1036,14 +1043,23 @@ window.submitNewSection = async function (e) {
 // 3. LIVE RECITATION LEDGER (Grouped by Student + Who Raised First)
 // ============================================================================
 async function fetchRecitationLedger() {
+  const requestId = ++ledgerRequestId;
+  const sectionId = currentSectionId;
+  const sessionId = activeSession?.id || "";
   try {
     const generation = authGeneration;
     if (!teacherToken && !guestToken) return;
-    const sessParam = activeSession ? `session_id=${activeSession.id}&` : "";
-    const res = await fetch(`/api/recitation/ledger?${sessParam}section_id=${currentSectionId}`);
+    const params = new URLSearchParams({ section_id: sectionId });
+    if (sessionId) params.set("session_id", sessionId);
+    const res = await fetch(`/api/recitation/ledger?${params}`, { cache: "no-store" });
     if (!res.ok) throw new Error(`Queue request failed (${res.status})`);
     const ledger = await res.json();
-    if (generation !== authGeneration) return;
+    if (
+      generation !== authGeneration ||
+      requestId !== ledgerRequestId ||
+      sectionId !== currentSectionId ||
+      sessionId !== (activeSession?.id || "")
+    ) return;
     currentLedger = ledger;
     renderRecitationLedger();
   } catch (err) {
@@ -1229,20 +1245,40 @@ window.awardDirectStudent = async function (seatId) {
 // 4. ATTENDANCE, SEATING GRID & HEATMAP
 // ============================================================================
 async function fetchSeats() {
+  const requestId = ++seatDataRequestId;
+  const sectionId = currentSectionId;
+  seatDataLoadingFor = sectionId;
+  if (!sectionId) {
+    currentSeats = [];
+    currentStudents = [];
+    seatDataLoadingFor = "";
+    renderClassroomDesks();
+    renderSectionRoster();
+    return;
+  }
   try {
     const generation = authGeneration;
     const [seatsRes, studentsRes] = await Promise.all([
-      fetch(`/api/seats?section_id=${currentSectionId}`),
-      role === "teacher" && currentSectionId
-        ? fetch(`/api/sections/${currentSectionId}/students`)
+      fetch(`/api/seats?section_id=${encodeURIComponent(sectionId)}`, { cache: "no-store" }),
+      role === "teacher"
+        ? fetch(`/api/sections/${encodeURIComponent(sectionId)}/students`, { cache: "no-store" })
         : Promise.resolve(null),
     ]);
 
-    const seats = seatsRes.ok ? await seatsRes.json() : null;
-    const students = studentsRes?.ok ? await studentsRes.json() : null;
-    if (generation !== authGeneration) return;
-    if (seats) currentSeats = seats;
-    currentStudents = students || [];
+    if (!seatsRes.ok) throw new Error(`Seat request failed (${seatsRes.status})`);
+    if (studentsRes && !studentsRes.ok) throw new Error(`Student request failed (${studentsRes.status})`);
+    const [seats, students] = await Promise.all([
+      seatsRes.json(),
+      studentsRes ? studentsRes.json() : Promise.resolve([]),
+    ]);
+    if (
+      generation !== authGeneration ||
+      requestId !== seatDataRequestId ||
+      sectionId !== currentSectionId
+    ) return;
+    currentSeats = seats;
+    if (role === "teacher") currentStudents = students;
+    seatDataLoadingFor = "";
 
     if (seatingViewMode === "heatmap") {
       await fetchHeatmapData();
@@ -1254,6 +1290,7 @@ async function fetchSeats() {
     renderSectionRoster();
     populateCalibrationInputs();
   } catch (err) {
+    if (requestId === seatDataRequestId) seatDataLoadingFor = "";
     console.error("Failed to load seats & students:", err);
   }
 }
@@ -1280,10 +1317,18 @@ window.closeSeatingSettingsModal = function () {
 };
 
 window.autoGenerateDesksFromEnrolled = async function () {
+  if (seatingMutationInProgress) {
+    showToast("A seating update is already in progress", "warning");
+    return;
+  }
   if (!currentSectionId) {
     showToast("Please select a class section first", "warning");
     return;
   }
+
+  const sectionId = currentSectionId;
+  if (seatDataLoadingFor === sectionId) await fetchSeats();
+  if (sectionId !== currentSectionId) return;
 
   const count = currentStudents.length;
   if (count === 0) {
@@ -1299,23 +1344,41 @@ window.autoGenerateDesksFromEnrolled = async function () {
     isDanger: false,
   });
   if (!confirmed) return;
+  if (sectionId !== currentSectionId) {
+    showToast("Section changed. Select Auto-Generate again for the current section.", "warning");
+    return;
+  }
 
+  seatingMutationInProgress = true;
   try {
-    const res = await fetch(`/api/sections/${currentSectionId}/seats/auto-generate-enrolled`, {
+    const res = await fetch(`/api/sections/${encodeURIComponent(sectionId)}/seats/auto-generate-enrolled`, {
       method: "POST",
     });
-    if (!res.ok) throw new Error("Failed to auto-generate desks");
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(detail || `Failed to auto-generate desks (${res.status})`);
+    }
     const updated = await res.json();
+    if (sectionId !== currentSectionId) return;
     currentSeats = updated;
     await fetchSeats();
     fetchRecitationLedger();
     showToast(`Generated ${updated.length} desks for all enrolled students`, "success");
   } catch (err) {
     showToast("Error: " + err.message, "error");
+  } finally {
+    seatingMutationInProgress = false;
   }
 };
 
 window.autoFillDesksAlphabetical = async function () {
+  if (seatingMutationInProgress) {
+    showToast("A seating update is already in progress", "warning");
+    return;
+  }
+  const sectionId = currentSectionId;
+  if (seatDataLoadingFor === sectionId) await fetchSeats();
+  if (!sectionId || sectionId !== currentSectionId) return;
   if (currentSeats.length === 0) {
     showToast("Please initialize a seating grid first", "warning");
     return;
@@ -1324,6 +1387,8 @@ window.autoFillDesksAlphabetical = async function () {
     showToast("No enrolled students found in this section", "warning");
     return;
   }
+  const seatsForSection = [...currentSeats];
+  const studentsForSection = [...currentStudents];
 
   // Sort students by last name
   function getStudentLastName(name) {
@@ -1336,7 +1401,7 @@ window.autoFillDesksAlphabetical = async function () {
     return parts[parts.length - 1].toLowerCase();
   }
 
-  const sortedStudents = [...currentStudents].sort((a, b) => {
+  const sortedStudents = studentsForSection.sort((a, b) => {
     const lastA = getStudentLastName(a.name);
     const lastB = getStudentLastName(b.name);
     const cmp = lastA.localeCompare(lastB);
@@ -1352,23 +1417,34 @@ window.autoFillDesksAlphabetical = async function () {
     isDanger: false,
   });
   if (!confirmed) return;
+  if (sectionId !== currentSectionId) {
+    showToast("Section changed. Select Auto-Fill again for the current section.", "warning");
+    return;
+  }
 
+  seatingMutationInProgress = true;
   try {
     // Attempt dedicated backend endpoint first
     let success = false;
     try {
-      const res = await fetch(`/api/sections/${currentSectionId}/seats/auto-fill-alphabetical`, {
+      const res = await fetch(`/api/sections/${encodeURIComponent(sectionId)}/seats/auto-fill-alphabetical`, {
         method: "POST",
       });
       if (res.ok) {
-        currentSeats = await res.json();
+        const updated = await res.json();
+        if (sectionId !== currentSectionId) return;
+        currentSeats = updated;
         success = true;
+      } else if (res.status !== 404 && res.status !== 405) {
+        throw new Error(`Auto-fill failed (${res.status})`);
       }
-    } catch (_) {}
+    } catch (error) {
+      if (error instanceof Error && !/Failed to fetch|NetworkError/i.test(error.message)) throw error;
+    }
 
     if (!success) {
       // Direct fallback via PUT /api/seats with sorted student assignments
-      const sortedSeats = [...currentSeats].sort((a, b) => {
+      const sortedSeats = [...seatsForSection].sort((a, b) => {
         if (a.grid_row !== undefined && b.grid_row !== undefined && a.grid_row !== b.grid_row) {
           return (a.grid_row || 0) - (b.grid_row || 0);
         }
@@ -1393,20 +1469,25 @@ window.autoFillDesksAlphabetical = async function () {
         }
       });
 
-      const putRes = await fetch(`/api/seats?section_id=${currentSectionId}`, {
+      const putRes = await fetch(`/api/seats?section_id=${encodeURIComponent(sectionId)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ seats: sortedSeats }),
       });
       if (!putRes.ok) throw new Error("Failed to save seat assignments");
-      currentSeats = await putRes.json();
+      const updated = await putRes.json();
+      if (sectionId !== currentSectionId) return;
+      currentSeats = updated;
     }
 
+    if (sectionId !== currentSectionId) return;
     await fetchSeats();
     fetchRecitationLedger();
     showToast(`Chairs filled alphabetically by student last name (A-Z)`, "success");
   } catch (err) {
     showToast(err.message, "error");
+  } finally {
+    seatingMutationInProgress = false;
   }
 };
 
@@ -2596,10 +2677,23 @@ function handleSocketMessage(msg) {
         activeSession = null;
       }
       updateSessionUI();
-      if (role === "teacher" && msg.payload.seats) {
-        currentSeats = msg.payload.seats;
+      if (role === "teacher") {
+        // The initial socket snapshot contains seats for every section owned by
+        // this teacher. Load only the selected section through the scoped API;
+        // showing the unfiltered snapshot causes other desks to flash briefly.
+        if (activeSession?.section_id && sectionsList.some((section) => section.id === activeSession.section_id)) {
+          currentSectionId = activeSession.section_id;
+          currentReportsSectionId = currentSectionId;
+          currentLedger = [];
+          populateSectionDropdown();
+          renderSectionsCards();
+          updateSectionUI();
+        }
+        currentSeats = [];
+        currentStudents = [];
         renderClassroomDesks();
-        renderGuestQueue();
+        renderSectionRoster();
+        renderRecitationLedger();
       }
       if (role === "teacher") fetchSeats();
       fetchRecitationLedger();
