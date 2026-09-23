@@ -1,0 +1,9 @@
+torch
+torchvision
+opencv-python
+mediapipe
+ultralytics
+numpy
+requests
+websocket-client
+python-dotenv

@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: classtrack-dashboard
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run_server.py --host 0.0.0.0 --port $PORT --no-reload
+    plan: free
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_PATH
+        value: hand_tracking.db
+      - key: EDGE_API_KEY
+        generateValue: true
+

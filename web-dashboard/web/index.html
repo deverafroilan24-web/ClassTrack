@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClassTrack — Classroom Participation Monitoring System</title>
+  <!-- Tailwind CSS Framework CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eff6ff',
+              100: '#dbeafe',
+              600: '#2563eb',
+              700: '#1d4ed8',
+              800: '#1e40af',
+              900: '#1e3a8a',
+            }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-slate-50 text-slate-900 font-sans antialiased min-h-screen flex flex-col">
+
+  <!-- Top Navigation Header -->
+  <header class="bg-white border-b border-slate-200 h-16 px-6 flex items-center justify-between sticky top-0 z-30 shadow-sm">
+    <!-- Left: Brand -->
+    <div class="flex items-center space-x-2.5">
+      <div class="w-9 h-9 bg-brand-800 text-white rounded-lg flex items-center justify-center font-bold shadow-sm">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 14l9-5-9-5-9 5 9 5z"/>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 14l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z"/>
+        </svg>
+      </div>
+      <div>
+        <h1 class="text-base font-bold text-slate-900 leading-none">ClassTrack</h1>
+        <span class="text-xs text-slate-500">Participation Monitoring</span>
+      </div>
+    </div>
+
+    <!-- Right: Date/Clock + Instructor -->
+    <div class="flex items-center space-x-5">
+      <div class="text-xs font-medium text-slate-500 tabular-nums" id="header-clock">--:--:--</div>
+
+      <div class="flex items-center space-x-2.5 pl-3 border-l border-slate-200">
+        <div class="w-8 h-8 rounded-full bg-slate-200 text-slate-700 flex items-center justify-center font-bold text-xs">
+          Prof
+        </div>
+        <span class="text-sm font-semibold text-slate-800">Instructor</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Layout -->
+  <div class="flex flex-1 overflow-hidden">
+    <!-- Sidebar Navigation -->
+    <aside class="w-56 bg-white border-r border-slate-200 flex flex-col justify-between py-4 shrink-0">
+      <nav class="space-y-1 px-3">
+        <button class="nav-tab w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-semibold text-brand-800 bg-brand-50 transition" data-view="class" onclick="showView('class')">
+          <svg class="w-5 h-5 text-brand-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          <span>Live Class</span>
+        </button>
+
+        <button class="nav-tab w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition" data-view="sections" onclick="showView('sections')">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+          <span>Class & Students</span>
+        </button>
+
+        <button class="nav-tab w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition" data-view="seating" onclick="showView('seating')">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>
+          <span>Attendance & Seating</span>
+        </button>
+
+        <button class="nav-tab w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition" data-view="history" onclick="showView('history')">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          <span>Session History</span>
+        </button>
+
+        <button class="nav-tab w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition" data-view="reports" onclick="showView('reports')">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+          <span>Class Reports</span>
+        </button>
+
+        <button class="nav-tab w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition" data-view="camera" onclick="showView('camera')">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+          <span>Camera Settings</span>
+        </button>
+
+        <button class="nav-tab w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition" data-view="settings" onclick="showView('settings')">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.636 18.364a9 9 0 010-12.728m12.728 0a9 9 0 010 12.728M9.172 14.828a4 4 0 010-5.656m5.656 0a4 4 0 010 5.656M12 12h.01"/></svg>
+          <span>Edge Nodes</span>
+        </button>
+      </nav>
+
+      <div class="px-5 py-3 border-t border-slate-200 text-xs text-slate-400">
+        ClassTrack Enterprise v1.0
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="flex-1 overflow-y-auto p-4 bg-slate-50">
+
+      <!-- VIEW 1: LIVE CLASS (Camera Feed Beside Live Student Participation Ledger) -->
+      <div id="view-class" class="view-panel space-y-3">
+        <!-- Prominent Live Class Session Header Bar -->
+        <div class="bg-white border border-slate-200 rounded-xl px-4 py-2.5 shadow-xs flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center space-x-3">
+            <div class="w-10 h-10 rounded-lg bg-brand-50 text-brand-700 flex items-center justify-center font-bold">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+            </div>
+            <div>
+              <div class="flex items-center space-x-2.5">
+                <h2 class="text-base font-bold text-slate-900" id="live-class-banner-title">Live Class Session</h2>
+                <span id="live-session-status-badge" class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600">
+                  No Active Session (Standby)
+                </span>
+              </div>
+              <p class="text-xs text-slate-500" id="live-session-desc">Click "Start Class Session" to begin tracking student participation and hand raises.</p>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <!-- Class Section Dropdown Switcher -->
+            <div class="flex items-center space-x-2 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200">
+              <label for="section-select" class="text-xs font-semibold text-slate-600">Class:</label>
+              <select id="section-select" class="bg-transparent text-xs font-bold text-brand-900 focus:outline-none cursor-pointer">
+                <!-- Populated dynamically via JS -->
+              </select>
+            </div>
+
+            <button id="btn-banner-start" onclick="startClassSession()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2 rounded-lg shadow-sm transition flex items-center space-x-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <span>Start Class Session</span>
+            </button>
+            <button id="btn-banner-stop" onclick="stopClassSession()" class="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-4 py-2 rounded-lg shadow-sm transition hidden flex items-center space-x-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/></svg>
+              <span>End Class Session</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Full-Width Live Recitation Participation Ledger (Video feed removed — runs on Camera Node) -->
+        <div class="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs flex flex-col">
+          <div class="px-4 py-2.5 border-b border-slate-200 flex justify-between items-center">
+            <div class="flex items-center space-x-2.5">
+              <h2 class="text-sm font-bold text-slate-800">Live Participation Queue</h2>
+              <span class="text-xs text-slate-500" id="current-section-room-label">—</span>
+              <span id="edge-connection-badge" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-500 border border-slate-200">No Camera Nodes</span>
+            </div>
+            <button onclick="fetchRecitationLedger()" class="text-xs text-slate-500 hover:text-slate-800 flex items-center space-x-1">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+              <span>Refresh</span>
+            </button>
+          </div>
+          <div class="overflow-x-auto flex-1 overflow-y-auto" style="max-height: calc(100vh - 220px);">
+            <table class="w-full text-left text-xs">
+              <thead class="bg-slate-50 text-slate-600 text-[11px] font-semibold border-b border-slate-200 uppercase sticky top-0 z-10">
+                <tr>
+                  <th class="px-3 py-2.5">#</th>
+                  <th class="px-3 py-2.5">Student</th>
+                  <th class="px-3 py-2.5">Desk</th>
+                  <th class="px-3 py-2.5">Status</th>
+                  <th class="px-3 py-2.5 text-center">Raises</th>
+                  <th class="px-3 py-2.5 text-center">Pts</th>
+                  <th class="px-3 py-2.5 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody id="recitation-tbody" class="divide-y divide-slate-100">
+                <!-- Rendered dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- VIEW 2: CLASS SECTIONS & STUDENTS REGISTRATION -->
+      <div id="view-sections" class="view-panel hidden space-y-6">
+        <div class="flex justify-between items-center">
+          <div>
+            <h2 class="text-lg font-bold text-slate-900">Class Sections & Student Registration</h2>
+            <p class="text-xs text-slate-500">Create course sections, then select a section to manage and register students.</p>
+          </div>
+          <div>
+            <button onclick="openNewSectionModal()" class="bg-brand-700 hover:bg-brand-800 text-white font-semibold text-xs px-3.5 py-2 rounded-lg shadow-xs transition flex items-center space-x-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+              <span>+ Create Section</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Available Sections Cards (Compact) -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3" id="sections-cards-grid">
+          <!-- Rendered dynamically -->
+        </div>
+
+        <!-- Student Roster Table for Active Section -->
+        <div id="section-roster-container" class="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+          <div class="px-4 py-3 border-b border-slate-200 flex justify-between items-center bg-slate-50/50">
+            <div class="flex items-center space-x-2">
+              <h3 class="text-sm font-bold text-slate-800" id="section-roster-header">Enrolled Students</h3>
+              <span class="text-xs text-slate-400 font-mono" id="section-roster-count">-- Students</span>
+            </div>
+            <button id="btn-open-register-student" onclick="openRegisterStudentModal()" class="bg-brand-700 hover:bg-brand-800 text-white font-semibold text-xs px-3 py-1.5 rounded-lg shadow-xs transition flex items-center space-x-1.5">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z"/></svg>
+              <span>+ Add Student to Section</span>
+            </button>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-sm">
+              <thead class="bg-slate-50 text-slate-600 text-xs font-semibold border-b border-slate-200 uppercase">
+                <tr>
+                  <th class="px-4 py-2.5">Student ID</th>
+                  <th class="px-4 py-2.5">Student Name</th>
+                  <th class="px-4 py-2.5">Assigned Desk</th>
+                  <th class="px-4 py-2.5">Attendance</th>
+                  <th class="px-4 py-2.5 text-center">Participation Points</th>
+                  <th class="px-4 py-2.5 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="section-roster-tbody" class="divide-y divide-slate-100">
+                <!-- Rendered dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- VIEW 3: ATTENDANCE & SEATING LAYOUT -->
+      <div id="view-seating" class="view-panel hidden space-y-4">
+        <!-- Clean Header Bar: Title Only, Class Section Dropdown & Settings Popup Button -->
+        <div class="bg-white border border-slate-200 rounded-xl px-5 py-3 shadow-xs flex flex-wrap justify-between items-center gap-3">
+          <!-- Left: Title Only & Section Selector -->
+          <div class="flex flex-wrap items-center gap-4">
+            <h2 class="text-base font-bold text-slate-900">Classroom Seating & Attendance</h2>
+
+            <div class="flex items-center space-x-2 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200">
+              <label for="seating-section-select" class="text-xs font-bold text-slate-700 flex items-center space-x-1">
+                <svg class="w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
+                <span>Class Section:</span>
+              </label>
+              <select id="seating-section-select" onchange="onSeatingSectionChange(event)" class="bg-transparent text-xs font-bold text-brand-900 focus:outline-none cursor-pointer">
+                <!-- Populated dynamically via JS -->
+              </select>
+            </div>
+          </div>
+
+          <!-- Right: Auto-Generate Enrolled Desks, Auto-Fill Button & Clean Settings Button -->
+          <div class="flex items-center space-x-2">
+            <button onclick="autoGenerateDesksFromEnrolled()" class="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-semibold text-xs shadow-xs transition" title="Auto-generate chairs to match exactly how many students are enrolled">
+              <svg class="w-3.5 h-3.5 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
+              </svg>
+              <span>Auto-Generate Desks (Enrolled)</span>
+            </button>
+
+            <button onclick="autoFillDesksAlphabetical()" class="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-brand-300 bg-brand-50 hover:bg-brand-100 text-brand-800 font-semibold text-xs shadow-xs transition" title="Auto-fill chairs with students alphabetically by last name (A-Z)">
+              <svg class="w-3.5 h-3.5 text-brand-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12"/>
+              </svg>
+              <span>Auto-Fill Chairs (A-Z)</span>
+            </button>
+
+            <button onclick="openSeatingSettingsModal()" class="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs shadow-xs transition">
+              <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+              <span>Seating Settings</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- MAIN SPLIT LAYOUT: Left Side Student Pool Sidebar | Right Side Desks Grid -->
+        <div class="flex flex-col lg:flex-row gap-4 items-start">
+
+          <!-- LEFT COLUMN: Vertical Scrollable Students List Pool -->
+          <div id="unassigned-pool-container" ondragover="allowDrop(event)" ondrop="handleUnassignDrop(event)" class="w-full lg:w-64 xl:w-72 shrink-0 bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs space-y-3 lg:sticky lg:top-20 transition-all">
+            <!-- Header (NO + Enroll Button) -->
+            <div class="flex items-center justify-between pb-2 border-b border-slate-100">
+              <div class="flex items-center space-x-2">
+                <div class="w-2.5 h-2.5 rounded-full bg-brand-600"></div>
+                <h3 class="text-xs font-bold text-slate-900 uppercase tracking-wider">Student Pool</h3>
+                <span id="unassigned-count-badge" class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200">(0)</span>
+              </div>
+            </div>
+
+            <!-- Pool Search Filter -->
+            <div class="relative">
+              <input type="text" id="pool-search-input" oninput="filterUnassignedStudentTray()" placeholder="Search enrolled students..." class="w-full bg-slate-50 border border-slate-200 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-brand-700">
+              <svg class="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+            </div>
+
+            <!-- Helper Instruction & Unassign Drop Zone Indicator -->
+            <div class="text-[11px] text-slate-400 bg-slate-50 rounded-lg p-2 border border-dashed border-slate-200 flex items-center space-x-1.5">
+              <svg class="w-3.5 h-3.5 text-slate-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/></svg>
+              <span>Drag to desk / Drag back to unassign</span>
+            </div>
+
+            <!-- Vertical Scrollable Tray of Student Cards -->
+            <div id="unassigned-students-tray" class="space-y-2 max-h-[calc(100vh-270px)] min-h-[160px] overflow-y-auto pr-1">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+
+          <!-- RIGHT COLUMN: Classroom Chairs / Seats / Tables Grid -->
+          <div class="flex-1 min-w-0 bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-col space-y-3.5">
+            <!-- Classroom Front Marker & Zoom Controls -->
+            <div class="flex flex-wrap items-center justify-between gap-2.5 bg-slate-100 border border-slate-200 rounded-lg px-3 py-2">
+              <div class="flex items-center space-x-2 text-xs font-bold text-slate-600 uppercase tracking-wider">
+                <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                <span>Front of Classroom — Teacher Podium & Board</span>
+              </div>
+
+              <!-- Zoom Slider for Room Seats -->
+              <div class="flex items-center space-x-2 bg-white px-2.5 py-1 rounded-lg border border-slate-200 shadow-2xs text-xs">
+                <span class="text-[11px] font-semibold text-slate-500 flex items-center space-x-1">
+                  <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                  <span>Zoom:</span>
+                </span>
+                <button type="button" onclick="stepSeatZoom(-10)" title="Zoom Out" class="text-slate-400 hover:text-slate-700 transition p-0.5 rounded hover:bg-slate-100">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4"/></svg>
+                </button>
+                <input type="range" id="seat-zoom-slider" min="60" max="150" value="100" step="5" class="w-20 sm:w-28 accent-brand-700 cursor-pointer h-1.5 bg-slate-200 rounded-lg" oninput="onSeatZoomChange(this.value)">
+                <button type="button" onclick="stepSeatZoom(10)" title="Zoom In" class="text-slate-400 hover:text-slate-700 transition p-0.5 rounded hover:bg-slate-100">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                </button>
+                <span id="seat-zoom-label" class="font-mono text-[11px] font-bold text-slate-700 min-w-[34px] text-right">100%</span>
+                <button type="button" onclick="resetSeatZoom()" class="text-[10px] text-brand-700 hover:text-brand-900 font-semibold hover:underline pl-0.5" title="Reset Zoom to 100%">Reset</button>
+              </div>
+            </div>
+
+            <!-- Interactive Desks Grid Container with smooth horizontal scrolling for responsive layout -->
+            <div class="w-full overflow-x-auto pb-2 focus:outline-none">
+              <div class="grid gap-3 min-w-max sm:min-w-0" id="classroom-desks-grid">
+                <!-- Rendered dynamically -->
+              </div>
+            </div>
+
+            <!-- Hidden Element Keepers for JS State Compatibility -->
+            <div class="hidden">
+              <span id="grid-dim-badge"></span>
+              <div id="heatmap-legend"></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- VIEW 4: SESSION HISTORY (DEDICATED SEPARATE PAGE) -->
+      <div id="view-history" class="view-panel hidden space-y-6">
+        <div class="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-4">
+          <div class="flex flex-wrap justify-between items-center gap-4">
+            <div>
+              <h2 class="text-base font-bold text-slate-900">Class Session History</h2>
+              <p class="text-xs text-slate-500">Review past class sessions, filter by class and date, or clear historical logs.</p>
+            </div>
+            <div class="flex items-center space-x-2">
+              <button onclick="fetchSessionsHistory()" class="text-xs text-slate-600 hover:text-slate-900 font-medium px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg border border-slate-200 transition flex items-center space-x-1.5">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                <span>Refresh History</span>
+              </button>
+              <button onclick="confirmClearAllSessions()" class="text-xs bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold px-3 py-1.5 rounded-lg border border-rose-200 transition flex items-center space-x-1.5">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                <span>Clear All History</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- History Filter Controls: Class Dropdown and Date Picker -->
+          <div class="flex flex-wrap items-center gap-3 bg-slate-50 p-3 rounded-lg border border-slate-200 text-xs">
+            <div class="flex items-center space-x-2">
+              <label for="history-section-filter" class="font-semibold text-slate-700">Class:</label>
+              <select id="history-section-filter" onchange="fetchSessionsHistory()" class="bg-white border border-slate-300 rounded-lg px-2.5 py-1 text-xs font-medium text-slate-800 focus:outline-none focus:ring-1 focus:ring-brand-700">
+                <option value="">All Classes</option>
+              </select>
+            </div>
+
+            <div class="flex items-center space-x-2">
+              <label for="history-date-filter" class="font-semibold text-slate-700">Date:</label>
+              <input type="date" id="history-date-filter" onchange="fetchSessionsHistory()" class="bg-white border border-slate-300 rounded-lg px-2 py-0.5 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-brand-700">
+              <button type="button" onclick="clearHistoryDateFilter()" class="text-xs text-slate-500 hover:text-slate-800 underline">Clear Date</button>
+            </div>
+
+            <span id="history-count-badge" class="ml-auto text-xs text-slate-500 font-medium">-- Sessions</span>
+          </div>
+
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-sm">
+              <thead class="bg-slate-50 text-slate-600 text-xs font-semibold border-b border-slate-200 uppercase">
+                <tr>
+                  <th class="px-4 py-2.5">Date & Time</th>
+                  <th class="px-4 py-2.5">Session Title</th>
+                  <th class="px-4 py-2.5">Section</th>
+                  <th class="px-4 py-2.5 text-center">Raises</th>
+                  <th class="px-4 py-2.5 text-center">Points</th>
+                  <th class="px-4 py-2.5 text-center">Status</th>
+                  <th class="px-4 py-2.5 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="sessions-history-tbody" class="divide-y divide-slate-100">
+                <!-- Rendered dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- VIEW 5: CLASS CUMULATIVE REPORTS & GRADING CALCULATOR -->
+      <div id="view-reports" class="view-panel hidden space-y-6">
+        <div class="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-5">
+          <div class="flex flex-wrap justify-between items-center gap-4">
+            <div>
+              <h2 class="text-lg font-bold text-slate-900" id="reports-class-title">Class Participation & Recitation Report</h2>
+              <p class="text-xs text-slate-500">Section-level recitation participation and points awarded.</p>
+            </div>
+            <div class="flex items-center space-x-2">
+              <button onclick="downloadClassReportCSV()" class="bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 font-semibold text-xs px-3.5 py-2 rounded-lg shadow-xs transition flex items-center space-x-1.5">
+                <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                <span>Export Report (CSV)</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Section Selector Filter Bar -->
+          <div class="flex flex-wrap items-center justify-between gap-3 bg-slate-50 p-3.5 rounded-lg border border-slate-200 text-xs">
+            <div class="flex items-center space-x-2">
+              <label for="reports-section-select" class="font-bold text-slate-700">Class Section:</label>
+              <select id="reports-section-select" onchange="onReportsSectionChange(event)" class="bg-white border border-slate-300 rounded-lg px-2.5 py-1 text-xs font-bold text-brand-900 focus:outline-none focus:ring-1 focus:ring-brand-700">
+                <!-- Populated dynamically via JS -->
+              </select>
+            </div>
+
+            <span id="reports-student-count" class="text-xs text-slate-500 font-medium">-- Students</span>
+          </div>
+
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-sm">
+              <thead class="bg-slate-50 text-slate-600 text-xs font-semibold border-b border-slate-200 uppercase">
+                <tr>
+                  <th class="px-4 py-2.5">Student</th>
+                  <th class="px-4 py-2.5">Assigned Desk</th>
+                  <th class="px-4 py-2.5 text-center">Total Raises</th>
+                  <th class="px-4 py-2.5 text-center">Points Awarded</th>
+                </tr>
+              </thead>
+              <tbody id="reports-tbody" class="divide-y divide-slate-100">
+                <!-- Rendered dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- VIEW 5: EDGE CAMERA NODES STATUS -->
+      <div id="view-settings" class="view-panel hidden space-y-6">
+        <div class="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-5">
+          <div>
+            <h2 class="text-base font-bold text-slate-900 mb-1">Edge Camera Nodes</h2>
+            <p class="text-xs text-slate-500">Camera Nodes run locally on the classroom PC and stream detected gesture events to this dashboard in real-time via WebSocket.</p>
+          </div>
+
+          <!-- Connection Status -->
+          <div class="bg-slate-50 border border-slate-200 rounded-xl p-4 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+              <div id="edge-status-dot" class="w-3 h-3 rounded-full bg-slate-300 animate-pulse"></div>
+              <div>
+                <span class="text-sm font-bold text-slate-800" id="edge-status-text">No Camera Nodes Connected</span>
+                <p class="text-xs text-slate-500" id="edge-status-desc">Start the Camera Node desktop app on the classroom PC to begin receiving live gesture events.</p>
+              </div>
+            </div>
+            <button onclick="fetchEdgeStatus()" class="text-xs text-slate-500 hover:text-slate-800 font-medium px-3 py-1.5 bg-white rounded-lg border border-slate-200 hover:bg-slate-50 transition">Refresh</button>
+          </div>
+
+          <!-- Architecture Diagram -->
+          <div class="border border-slate-200 rounded-xl p-5 space-y-3">
+            <h3 class="text-sm font-bold text-slate-800">System Architecture</h3>
+            <div class="flex items-center justify-center space-x-4 py-4">
+              <div class="text-center space-y-1.5">
+                <div class="w-20 h-20 bg-brand-50 border-2 border-brand-300 rounded-xl flex items-center justify-center">
+                  <svg class="w-8 h-8 text-brand-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                </div>
+                <div class="text-[11px] font-bold text-slate-800">Camera Node</div>
+                <div class="text-[10px] text-slate-500">Desktop PC<br>YOLO + OpenCV</div>
+              </div>
+              <div class="flex flex-col items-center space-y-1">
+                <svg class="w-8 h-4 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 32 16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2 8h20m0 0l-6-6m6 6l-6 6"/></svg>
+                <span class="text-[10px] font-bold text-emerald-600">Events via WS/REST</span>
+              </div>
+              <div class="text-center space-y-1.5">
+                <div class="w-20 h-20 bg-emerald-50 border-2 border-emerald-300 rounded-xl flex items-center justify-center">
+                  <svg class="w-8 h-8 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"/></svg>
+                </div>
+                <div class="text-[11px] font-bold text-slate-800">Web Dashboard</div>
+                <div class="text-[10px] text-slate-500">Cloud / Local<br>FastAPI + SQLite</div>
+              </div>
+              <div class="flex flex-col items-center space-y-1">
+                <svg class="w-8 h-4 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 32 16"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2 8h20m0 0l-6-6m6 6l-6 6"/></svg>
+                <span class="text-[10px] font-bold text-brand-600">WebSocket Push</span>
+              </div>
+              <div class="text-center space-y-1.5">
+                <div class="w-20 h-20 bg-slate-50 border-2 border-slate-300 rounded-xl flex items-center justify-center">
+                  <svg class="w-8 h-8 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                </div>
+                <div class="text-[11px] font-bold text-slate-800">Teacher Browser</div>
+                <div class="text-[10px] text-slate-500">Any Device<br>Live Ledger</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- VIEW 6: CAMERA SETTINGS (Remote Control for Edge Camera Node) -->
+      <div id="view-camera" class="view-panel hidden space-y-6">
+        <div class="bg-white border border-slate-200 rounded-xl p-6 shadow-xs space-y-6">
+          <div class="flex items-center justify-between pb-4 border-b border-slate-100">
+            <div>
+              <h2 class="text-base font-bold text-slate-900">Edge Camera Settings</h2>
+              <p class="text-xs text-slate-500">Configure computer vision inference and visual overlays across connected Camera Nodes in real-time.</p>
+            </div>
+            <span id="cam-settings-node-badge" class="px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-600">
+              Checking nodes...
+            </span>
+          </div>
+
+          <!-- Section 1: Visual Overlay Options -->
+          <div class="space-y-4">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Visual Overlays</h3>
+            
+            <!-- Toggle: Bone Structure / Body Keypoints -->
+            <div class="flex items-center justify-between p-4 bg-slate-50 border border-slate-200 rounded-xl">
+              <div class="space-y-0.5">
+                <div class="flex items-center space-x-2">
+                  <span class="text-sm font-bold text-slate-800">Enable Bone Structure & Body Points</span>
+                  <span class="px-2 py-0.5 text-[10px] font-semibold bg-brand-100 text-brand-700 rounded-full">Joint Keypoints</span>
+                </div>
+                <p class="text-xs text-slate-500">Draws skeleton bones and colored tracking points on shoulders, elbows, wrists, and nose. Turn off for pure bounding boxes.</p>
+              </div>
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" id="cam-toggle-skeleton" onchange="toggleSkeletonOverlay(this.checked)" class="sr-only peer">
+                <div class="w-11 h-6 bg-slate-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+              </label>
+            </div>
+          </div>
+
+          <!-- Section 2: AI Vision Model Architecture -->
+          <div class="space-y-4">
+            <div class="flex items-center justify-between">
+              <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Pose Estimation AI Model</h3>
+              <span class="text-xs font-semibold text-slate-500">Hot-swaps live on GPU / CPU</span>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="ai-model-cards-container">
+              <!-- AI model cards populated dynamically -->
+            </div>
+          </div>
+
+          <!-- Section 3: Detection Confidence Threshold -->
+          <div class="space-y-3">
+            <div class="flex items-center justify-between">
+              <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Detection Confidence Threshold</h3>
+              <span id="cam-confidence-label" class="text-xs font-bold text-brand-700">0.50</span>
+            </div>
+            <div class="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+              <input type="range" id="cam-confidence-slider" min="0.25" max="0.85" step="0.05" value="0.50" oninput="onConfidenceSliderChange(this.value)" class="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-brand-700">
+              <div class="flex justify-between text-[11px] text-slate-400 font-medium">
+                <span>0.25 (Lenient / Higher Recall)</span>
+                <span>0.50 (Recommended)</span>
+                <span>0.85 (Strict / Fewer False Positives)</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Footer Action Button -->
+          <div class="pt-4 border-t border-slate-100 flex items-center justify-between">
+            <span class="text-xs text-slate-400">Changes apply immediately to all active Camera Nodes.</span>
+            <button onclick="saveCameraSettings()" class="bg-brand-700 hover:bg-brand-800 text-white font-bold text-xs px-5 py-2.5 rounded-lg shadow-sm transition flex items-center space-x-1.5">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+              <span>Sync All Camera Nodes</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- MODAL: REGISTER / ENROLL STUDENT (1-SHOT PHOTO & BIOMETRIC EMBEDDING) -->
+  <!-- MODAL: REGISTER / ADD NEW STUDENT -->
+  <div id="modal-register-student" class="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center hidden z-50 p-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4">
+      <div class="flex justify-between items-center pb-2 border-b border-slate-100">
+        <div>
+          <h3 class="text-base font-bold text-slate-900">Add Student to Section</h3>
+          <p class="text-xs text-slate-500">Enrolling into: <span id="modal-enroll-section-name" class="font-bold text-brand-700">Selected Section</span></p>
+        </div>
+        <button type="button" onclick="closeRegisterStudentModal()" class="text-slate-400 hover:text-slate-700 text-lg leading-none">&times;</button>
+      </div>
+
+      <form id="form-register-student" onsubmit="submitRegisterStudent(event)" class="space-y-4 text-xs">
+        <div>
+          <label class="block font-semibold text-slate-700 mb-1">Student Full Name: <span class="text-rose-500">*</span></label>
+          <input type="text" id="reg-student-name" required placeholder="e.g. Juan Dela Cruz" class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-700">
+        </div>
+
+        <div>
+          <label class="block font-semibold text-slate-700 mb-1">Student ID Number:</label>
+          <input type="text" id="reg-student-id" placeholder="e.g. 2023-0145" class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-700">
+        </div>
+
+        <div>
+          <label class="block font-semibold text-slate-700 mb-1">Desk Assignment:</label>
+          <select id="reg-seat-select" class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-brand-700 text-slate-700">
+            <option value="">-- Leave Unassigned (Add to Pool) --</option>
+          </select>
+          <div class="mt-2 flex items-center space-x-2">
+            <input type="checkbox" id="reg-auto-desk" class="rounded text-brand-700 focus:ring-brand-700 cursor-pointer">
+            <label for="reg-auto-desk" class="text-xs font-medium text-slate-700 cursor-pointer">Auto-create and place in a new desk</label>
+          </div>
+          <p class="text-[10px] text-slate-400 mt-1">If unassigned, the student will appear in the Student Pool ready to be placed on a desk.</p>
+        </div>
+
+        <div class="flex justify-end space-x-2 pt-2 border-t border-slate-100">
+          <button type="button" onclick="closeRegisterStudentModal()" class="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 font-medium hover:bg-slate-50">Cancel</button>
+          <button type="submit" id="btn-submit-enroll" class="px-4 py-1.5 rounded-lg bg-brand-700 text-white font-semibold hover:bg-brand-800 shadow-xs">
+            Save Student
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: CREATE NEW CLASS SECTION -->
+  <div id="modal-new-section" class="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center hidden z-50">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+      <h3 class="text-base font-bold text-slate-900 mb-3">Create Course Section</h3>
+      <form id="form-new-section" onsubmit="submitNewSection(event)" class="space-y-4 text-xs">
+        <div>
+          <label class="block font-semibold text-slate-700 mb-1">Section Name:</label>
+          <input type="text" id="sec-name" placeholder="e.g. BSCS 3-B" required class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-700">
+        </div>
+        <div>
+          <label class="block font-semibold text-slate-700 mb-1">Course / Subject:</label>
+          <input type="text" id="sec-subject" placeholder="e.g. Computer Networks" required class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-700">
+        </div>
+        <div class="flex justify-end space-x-2 pt-2">
+          <button type="button" onclick="closeNewSectionModal()" class="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 font-medium">Cancel</button>
+          <button type="submit" class="px-4 py-1.5 rounded-lg bg-brand-700 text-white font-semibold hover:bg-brand-800">Create Section</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: SESSION BREAKDOWN DETAILS -->
+  <div id="modal-session-details" class="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center hidden z-50 p-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden">
+      <div class="p-5 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+        <div>
+          <h3 class="text-base font-bold text-slate-900" id="modal-session-title">Session Breakdown</h3>
+          <p class="text-xs text-slate-500" id="modal-session-subtitle">Session Details</p>
+        </div>
+        <button onclick="closeSessionDetailsModal()" class="text-slate-400 hover:text-slate-700">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="p-5 overflow-y-auto flex-1 space-y-4">
+        <div class="grid grid-cols-3 gap-3 text-center">
+          <div class="bg-slate-50 p-3 rounded-lg border border-slate-200">
+            <span class="text-xs text-slate-500">Total Raises</span>
+            <div class="text-lg font-bold text-slate-800" id="modal-session-raises">0</div>
+          </div>
+          <div class="bg-slate-50 p-3 rounded-lg border border-slate-200">
+            <span class="text-xs text-slate-500">Points Awarded</span>
+            <div class="text-lg font-bold text-emerald-700" id="modal-session-points">0</div>
+          </div>
+          <div class="bg-slate-50 p-3 rounded-lg border border-slate-200">
+            <span class="text-xs text-slate-500">Active Students</span>
+            <div class="text-lg font-bold text-brand-700" id="modal-session-students">0</div>
+          </div>
+        </div>
+
+        <table class="w-full text-left text-sm">
+          <thead class="bg-slate-50 text-slate-600 text-xs font-semibold border-b border-slate-200 uppercase">
+            <tr>
+              <th class="px-3 py-2">Desk</th>
+              <th class="px-3 py-2">Student Name</th>
+              <th class="px-3 py-2 text-center">Raises</th>
+              <th class="px-3 py-2 text-center">Points</th>
+            </tr>
+          </thead>
+          <tbody id="modal-session-tbody" class="divide-y divide-slate-100">
+            <!-- Rendered dynamically -->
+          </tbody>
+        </table>
+      </div>
+      <div class="p-4 border-t border-slate-200 flex justify-between items-center bg-slate-50">
+        <button id="modal-session-download-btn" class="bg-brand-700 hover:bg-brand-800 text-white font-semibold text-xs px-3.5 py-1.5 rounded-lg flex items-center space-x-1.5">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          <span>Download Session CSV</span>
+        </button>
+        <button onclick="closeSessionDetailsModal()" class="text-xs font-medium text-slate-600 hover:text-slate-900 px-3 py-1.5 rounded border border-slate-300">
+          Close
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: SEATING & CLASSROOM SETTINGS POPUP -->
+  <div id="modal-seating-settings" class="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center hidden z-50 p-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-5 space-y-4 max-h-[90vh] overflow-y-auto">
+      <div class="flex justify-between items-center pb-3 border-b border-slate-200">
+        <div class="flex items-center space-x-2.5">
+          <div class="w-8 h-8 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-slate-900">Seating & Grid Settings</h3>
+            <p class="text-[11px] text-slate-500">Configure layout dimensions, presets, attendance, and camera bounds.</p>
+          </div>
+        </div>
+        <button type="button" onclick="closeSeatingSettingsModal()" class="text-slate-400 hover:text-slate-700 text-lg leading-none">&times;</button>
+      </div>
+
+      <!-- Section 1: View Mode -->
+      <div class="space-y-1.5">
+        <label class="block text-xs font-bold text-slate-700">Display View Mode:</label>
+        <div class="flex rounded-lg bg-slate-100 p-1 border border-slate-200 text-xs">
+          <button id="btn-mode-seating" onclick="setSeatingViewMode('seating')" class="flex-1 flex items-center justify-center space-x-1.5 py-1.5 rounded-md font-bold transition bg-white text-brand-900 shadow-xs">
+            <svg class="w-3.5 h-3.5 text-brand-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>
+            <span>Seating Map</span>
+          </button>
+          <button id="btn-mode-heatmap" onclick="setSeatingViewMode('heatmap')" class="flex-1 flex items-center justify-center space-x-1.5 py-1.5 rounded-md font-semibold text-slate-600 hover:text-slate-900 transition">
+            <svg class="w-3.5 h-3.5 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+            <span>Participation Heatmap</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Section 2: Grid Dimensions -->
+      <div class="space-y-1.5">
+        <label class="block text-xs font-bold text-slate-700">Grid Dimensions:</label>
+        <div class="flex items-center space-x-2 bg-slate-50 p-2.5 rounded-lg border border-slate-200 text-xs">
+          <div class="flex items-center space-x-1.5">
+            <label for="grid-rows-input" class="text-slate-600 font-medium">Rows:</label>
+            <input type="number" id="grid-rows-input" min="1" max="10" value="3" class="w-14 bg-white border border-slate-300 rounded px-2 py-1 text-center font-bold text-slate-800">
+          </div>
+          <div class="flex items-center space-x-1.5">
+            <label for="grid-cols-input" class="text-slate-600 font-medium">Cols:</label>
+            <input type="number" id="grid-cols-input" min="1" max="10" value="3" class="w-14 bg-white border border-slate-300 rounded px-2 py-1 text-center font-bold text-slate-800">
+          </div>
+          <button onclick="applyGridDimensions(); closeSeatingSettingsModal();" class="bg-brand-700 hover:bg-brand-800 text-white font-semibold px-3 py-1 rounded shadow-xs transition ml-auto">
+            Apply Grid
+          </button>
+        </div>
+      </div>
+
+      <!-- Section 3: Quick Presets -->
+      <div class="space-y-1.5">
+        <label class="block text-xs font-bold text-slate-700">Quick Layout Presets:</label>
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+          <button onclick="loadSeatPreset('2-seats'); closeSeatingSettingsModal();" class="bg-white hover:bg-slate-50 text-slate-700 font-semibold p-2 rounded-lg border border-slate-300 shadow-xs text-center">
+            2 Desks
+          </button>
+          <button onclick="loadSeatPreset('3-seats'); closeSeatingSettingsModal();" class="bg-white hover:bg-slate-50 text-slate-700 font-semibold p-2 rounded-lg border border-slate-300 shadow-xs text-center">
+            3 Desks
+          </button>
+          <button onclick="loadSeatPreset('4-seats'); closeSeatingSettingsModal();" class="bg-white hover:bg-slate-50 text-slate-700 font-semibold p-2 rounded-lg border border-slate-300 shadow-xs text-center">
+            4 Desks (2×2)
+          </button>
+          <button onclick="applyPresetGrid(3, 3); closeSeatingSettingsModal();" class="bg-white hover:bg-slate-50 text-slate-700 font-semibold p-2 rounded-lg border border-slate-300 shadow-xs text-center">
+            3×3 (9 Desks)
+          </button>
+          <button onclick="applyPresetGrid(3, 4); closeSeatingSettingsModal();" class="bg-white hover:bg-slate-50 text-slate-700 font-semibold p-2 rounded-lg border border-slate-300 shadow-xs text-center">
+            3×4 (12 Desks)
+          </button>
+          <button onclick="applyPresetGrid(4, 4); closeSeatingSettingsModal();" class="bg-white hover:bg-slate-50 text-slate-700 font-semibold p-2 rounded-lg border border-slate-300 shadow-xs text-center">
+            4×4 (16 Desks)
+          </button>
+        </div>
+      </div>
+
+      <!-- Section 4: Bulk Attendance -->
+      <div class="space-y-1.5">
+        <label class="block text-xs font-bold text-slate-700">Bulk Attendance:</label>
+        <div class="flex space-x-2">
+          <button onclick="markAllAttendance(true); closeSeatingSettingsModal();" class="flex-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-300 font-semibold text-xs py-2 rounded-lg transition flex items-center justify-center space-x-1.5">
+            <svg class="w-4 h-4 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            <span>Mark All Present</span>
+          </button>
+          <button onclick="markAllAttendance(false); closeSeatingSettingsModal();" class="flex-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 font-semibold text-xs py-2 rounded-lg transition flex items-center justify-center space-x-1.5">
+            <svg class="w-4 h-4 text-rose-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            <span>Mark All Absent</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Section 5: Seating Plan Actions -->
+      <div class="space-y-1.5 pt-2 border-t border-slate-100">
+        <label class="block text-xs font-bold text-slate-700">Seating Plan Actions:</label>
+        <div class="space-y-2">
+          <button onclick="autoGenerateDesksFromEnrolled(); closeSeatingSettingsModal();" class="w-full bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-semibold text-xs py-2 rounded-lg transition flex items-center justify-center space-x-1.5">
+            <svg class="w-4 h-4 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+            <span>Auto-Generate Desks (Only Enrolled Students)</span>
+          </button>
+          <div class="flex space-x-2">
+            <button onclick="autoFillDesksAlphabetical(); closeSeatingSettingsModal();" class="flex-1 bg-brand-50 hover:bg-brand-100 text-brand-800 border border-brand-200 font-semibold text-xs py-2 rounded-lg transition flex items-center justify-center space-x-1.5">
+              <svg class="w-4 h-4 text-brand-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12"/></svg>
+              <span>Auto-Fill Alphabetical (A-Z)</span>
+            </button>
+            <button onclick="clearAllSeatAssignments(); closeSeatingSettingsModal();" class="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 font-semibold text-xs py-2 rounded-lg transition flex items-center justify-center space-x-1.5">
+              <svg class="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+              <span>Unassign All to Pool</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex justify-end pt-2 border-t border-slate-100">
+        <button type="button" onclick="closeSeatingSettingsModal()" class="px-4 py-1.5 rounded-lg border border-slate-300 text-slate-700 font-medium text-xs hover:bg-slate-50">
+          Close
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Floating Toast Notification Container -->
+  <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none"></div>
+
+  <!-- Small Custom Confirmation Modal Popup (replaces browser confirm) -->
+  <div id="modal-confirm" class="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center hidden z-50 p-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-sm p-5 space-y-4 border border-slate-100 transform transition-all">
+      <div class="flex items-start space-x-3.5">
+        <div id="modal-confirm-icon-bg" class="w-10 h-10 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+          </svg>
+        </div>
+        <div class="flex-1">
+          <h4 class="text-sm font-bold text-slate-900" id="modal-confirm-title">Confirm Action</h4>
+          <p class="text-xs text-slate-500 mt-1" id="modal-confirm-message">Are you sure you want to proceed?</p>
+        </div>
+      </div>
+      <div class="flex justify-end space-x-2 pt-1 border-t border-slate-100">
+        <button type="button" id="modal-confirm-cancel-btn" class="text-xs font-medium text-slate-600 hover:text-slate-900 px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-slate-50 transition">
+          Cancel
+        </button>
+        <button type="button" id="modal-confirm-ok-btn" class="text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 px-3.5 py-1.5 rounded-lg shadow-xs transition">
+          Confirm
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/client/app.js?v=2.0"></script>
+  <link rel="stylesheet" href="/client/style.css?v=2.0">
+</body>
+</html>

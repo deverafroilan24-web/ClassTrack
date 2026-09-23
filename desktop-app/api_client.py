@@ -1,0 +1,227 @@
+"""
+API Client for Camera Node → Web Dashboard Communication.
+
+Handles:
+- Fetching sections and seat configurations from the remote dashboard
+- Posting gesture events via REST (POST /api/events/ingest)
+- Persistent WebSocket connection to /ws/edge for bidirectional comms
+"""
+
+import json
+import threading
+import time
+from typing import Any, Callable, Dict, List, Optional
+
+import requests
+
+
+class DashboardAPIClient:
+    """
+    REST + WebSocket client for communicating with the remote Web Dashboard.
+    """
+
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8000",
+        api_key: str = "",
+        on_session_command: Optional[Callable[[dict], None]] = None,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.on_session_command = on_session_command
+        self._connected = False
+        self._ws_thread: Optional[threading.Thread] = None
+        self._ws_running = False
+        self._session_id: Optional[str] = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    @property
+    def session_id(self) -> Optional[str]:
+        return self._session_id
+
+    def _headers(self) -> dict:
+        h = {"Content-Type": "application/json"}
+        if self.api_key:
+            h["X-Edge-Key"] = self.api_key
+        return h
+
+    # ------------------------------------------------------------------
+    # REST Endpoints
+    # ------------------------------------------------------------------
+
+    def fetch_sections(self) -> List[Dict[str, Any]]:
+        """GET /api/sections"""
+        try:
+            resp = requests.get(f"{self.base_url}/api/sections", headers=self._headers(), timeout=5)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            print(f"[APIClient] Failed to fetch sections: {e}")
+            return []
+
+    def fetch_seats(self, section_id: str = "") -> List[Dict[str, Any]]:
+        """GET /api/seats?section_id=..."""
+        try:
+            params = {}
+            if section_id:
+                params["section_id"] = section_id
+            resp = requests.get(
+                f"{self.base_url}/api/seats",
+                params=params,
+                headers=self._headers(),
+                timeout=5,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            print(f"[APIClient] Failed to fetch seats: {e}")
+            return []
+
+    def fetch_active_session(self) -> Optional[Dict[str, Any]]:
+        """GET /api/sessions/active"""
+        try:
+            resp = requests.get(f"{self.base_url}/api/sessions/active", headers=self._headers(), timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data:
+                    self._session_id = data.get("id")
+                return data
+            return None
+        except Exception as e:
+            print(f"[APIClient] Failed to fetch active session: {e}")
+            return None
+
+    def post_event(self, event_payload: dict) -> bool:
+        """POST /api/events/ingest — send a gesture event to the dashboard."""
+        try:
+            resp = requests.post(
+                f"{self.base_url}/api/events/ingest",
+                json=event_payload,
+                headers=self._headers(),
+                timeout=3,
+            )
+            if resp.status_code == 200:
+                return True
+            elif resp.status_code == 409:
+                # No active session
+                return False
+            else:
+                print(f"[APIClient] Event ingest returned {resp.status_code}: {resp.text}")
+                return False
+        except Exception as e:
+            print(f"[APIClient] Failed to post event: {e}")
+            return False
+
+    def sync_seats(self, seats_data: list, section_id: str = "") -> bool:
+        """PUT /api/seats — push calibrated seat coordinates to dashboard."""
+        try:
+            params = {}
+            if section_id:
+                params["section_id"] = section_id
+            resp = requests.put(
+                f"{self.base_url}/api/seats",
+                json={"seats": seats_data},
+                params=params,
+                headers=self._headers(),
+                timeout=5,
+            )
+            return resp.status_code == 200
+        except Exception as e:
+            print(f"[APIClient] Failed to sync seats: {e}")
+            return False
+
+    def check_connection(self) -> bool:
+        """Quick health check against the dashboard."""
+        try:
+            resp = requests.get(f"{self.base_url}/api/edge/status", headers=self._headers(), timeout=3)
+            self._connected = resp.status_code == 200
+            return self._connected
+        except Exception:
+            self._connected = False
+            return False
+
+    # ------------------------------------------------------------------
+    # WebSocket Edge Connection
+    # ------------------------------------------------------------------
+
+    def start_edge_websocket(self):
+        """Start persistent WebSocket connection to /ws/edge in background thread."""
+        if self._ws_running:
+            return
+        self._ws_running = True
+        self._ws_thread = threading.Thread(target=self._ws_loop, daemon=True, name="EdgeWSThread")
+        self._ws_thread.start()
+
+    def stop_edge_websocket(self):
+        self._ws_running = False
+
+    def _ws_loop(self):
+        """Background WebSocket connection loop with auto-reconnect."""
+        try:
+            import websocket
+        except ImportError:
+            print("[APIClient] websocket-client not installed. Using REST-only mode.")
+            return
+
+        ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
+        ws_url = f"{ws_url}/ws/edge"
+
+        while self._ws_running:
+            try:
+                ws = websocket.WebSocket()
+                ws.connect(ws_url, timeout=10)
+                self._connected = True
+                print(f"[APIClient] Connected to dashboard WebSocket: {ws_url}")
+
+                while self._ws_running:
+                    try:
+                        ws.settimeout(5.0)
+                        data = ws.recv()
+                        if data:
+                            msg = json.loads(data)
+                            self._handle_ws_message(msg)
+                    except websocket.WebSocketTimeoutException:
+                        # Send heartbeat
+                        try:
+                            ws.send("ping")
+                        except Exception:
+                            break
+                    except Exception as e:
+                        print(f"[APIClient] WS receive error: {e}")
+                        break
+
+                ws.close()
+            except Exception as e:
+                print(f"[APIClient] WS connection failed: {e}")
+
+            self._connected = False
+            if self._ws_running:
+                time.sleep(3)  # Reconnect delay
+
+    def _handle_ws_message(self, msg: dict):
+        """Handle commands from the web dashboard."""
+        msg_type = msg.get("type", "")
+
+        if msg_type == "EDGE_INIT":
+            active = msg.get("active_session")
+            if active:
+                self._session_id = active.get("id")
+                print(f"[APIClient] Active session: {self._session_id}")
+            else:
+                self._session_id = None
+                print("[APIClient] No active session on dashboard.")
+
+        elif msg_type == "SESSION_STARTED":
+            self._session_id = msg.get("session_id")
+            print(f"[APIClient] Session started: {self._session_id}")
+
+        elif msg_type == "SESSION_STOPPED":
+            self._session_id = None
+            print("[APIClient] Session stopped.")
+
+        # Forward to callback if registered
+        if self.on_session_command:
+            self.on_session_command(msg)
