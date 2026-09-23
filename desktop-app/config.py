@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Remote Web Dashboard URL (where gesture events are sent)
-WEB_DASHBOARD_URL = os.getenv("WEB_DASHBOARD_URL", "http://127.0.0.1:8000")
+WEB_DASHBOARD_URL = os.getenv("WEB_DASHBOARD_URL", "https://classtrack-mm41.onrender.com")
 
 # Edge authentication key (must match EDGE_API_KEY on the web-dashboard)
 EDGE_API_KEY = os.getenv("EDGE_API_KEY", "")
@@ -36,16 +36,10 @@ TARGET_FPS = int(os.getenv("TARGET_FPS", "30"))
 def resolve_model_path(model_name: str = "") -> str:
     """
     Resolve a YOLO .pt path within desktop-app/models or desktop-app/.
-
-    Search order:
-    1. As-given path (absolute or relative to CWD)
-    2. <desktop-app>/models/<basename>
-    3. <desktop-app>/<basename>
-
-    Returns the first existing path, else the original string (let
-    ultralytics attempt download / raise a clear error).
+    Supports both source execution and frozen PyInstaller bundles.
     """
     from pathlib import Path
+    import sys
 
     name = (model_name or YOLO_MODEL or "").strip() or "yolo11s-pose.pt"
     # Absolute or CWD-relative hit
@@ -53,7 +47,11 @@ def resolve_model_path(model_name: str = "") -> str:
     if direct.is_file():
         return str(direct)
 
-    base = Path(__file__).resolve().parent  # desktop-app/
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).resolve().parent
+    else:
+        base = Path(__file__).resolve().parent
+
     candidates = [
         base / "models" / Path(name).name,
         base / Path(name).name,
