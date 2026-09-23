@@ -242,6 +242,8 @@ class DatabaseManager:
                 conn.execute("ALTER TABLE teachers ALTER COLUMN created_at SET DEFAULT NOW()")
                 conn.execute("ALTER TABLE teachers ALTER COLUMN id SET DEFAULT ('teacher_' || replace(gen_random_uuid()::text, '-', ''))")
                 conn.execute("ALTER TABLE teachers ADD COLUMN IF NOT EXISTS auth_version INTEGER NOT NULL DEFAULT 1")
+                conn.execute("ALTER TABLE teachers ENABLE ROW LEVEL SECURITY")
+                conn.execute("REVOKE ALL ON TABLE teachers FROM anon, authenticated")
             else:
                 if "pin" not in {row[1] for row in conn.execute("PRAGMA table_info(teachers)")}:
                     conn.execute("ALTER TABLE teachers ADD COLUMN pin TEXT")
