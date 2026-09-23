@@ -183,6 +183,7 @@ window.showConfirmModal = function ({
 window.showView = function (viewName) {
   document.querySelectorAll(".nav-tab").forEach((tab) => {
     const isActive = tab.dataset.view === viewName;
+    tab.setAttribute("aria-current", isActive ? "page" : "false");
     tab.classList.toggle("bg-brand-50", isActive);
     tab.classList.toggle("text-brand-800", isActive);
     tab.classList.toggle("font-semibold", isActive);
@@ -216,6 +217,13 @@ window.showView = function (viewName) {
     fetchCameraSettings();
   }
 };
+
+function labelResponsiveCells(row, labels) {
+  row.classList.add("responsive-row");
+  row.querySelectorAll("td").forEach((cell, index) => {
+    cell.dataset.label = labels[index] || "";
+  });
+}
 
 // Clock
 function startClock() {
@@ -523,6 +531,7 @@ function renderSectionRoster() {
         </div>
       </td>
     `;
+    labelResponsiveCells(tr, ["Student ID", "Student", "Assigned desk", "Attendance", "Points", "Actions"]);
     sectionRosterTbody.appendChild(tr);
   });
 }
@@ -813,6 +822,7 @@ function renderRecitationLedger() {
       <td class="px-2.5 py-2 text-center font-bold text-slate-800 text-xs">${student.total_points || 0}</td>
       <td class="px-2.5 py-2 text-right">${actionBtn}</td>
     `;
+    labelResponsiveCells(tr, ["Queue", "Student", "Status", "Raises", "Points", "Action"]);
     recitationTbody.appendChild(tr);
 
     // Staggered smooth fade-in
@@ -1837,6 +1847,7 @@ function renderSessionsHistory() {
         </div>
       </td>
     `;
+    labelResponsiveCells(tr, ["Date & time", "Session", "Section", "Raises", "Points", "Status", "Actions"]);
     tbody.appendChild(tr);
   });
 }
@@ -1887,6 +1898,7 @@ window.openSessionDetailsModal = async function (sessionId) {
         <td class="px-3 py-2 text-center font-semibold text-slate-800">${st.total_raises}</td>
         <td class="px-3 py-2 text-center font-bold text-emerald-700">${st.total_points}</td>
       `;
+      labelResponsiveCells(tr, ["Desk", "Student", "Raises", "Points"]);
       tbody.appendChild(tr);
     });
 
@@ -1963,6 +1975,7 @@ window.fetchClassGrades = async function () {
         <td class="px-4 py-3 text-center font-bold text-slate-800">${st.total_raises || 0}</td>
         <td class="px-4 py-3 text-center font-bold text-emerald-700">${st.total_points || 0}</td>
       `;
+      labelResponsiveCells(tr, ["Student", "Assigned desk", "Total raises", "Points awarded"]);
       reportsTbody.appendChild(tr);
     });
   } catch (err) {
