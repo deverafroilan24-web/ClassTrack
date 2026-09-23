@@ -32,11 +32,13 @@ class VisionWorker:
         debounce_sec: float = 0.35,
         on_event: Optional[Callable[[GestureEventPayload], None]] = None,
         on_frame: Optional[Callable[[bytes], None]] = None,
+        on_raw_frame: Optional[Callable[[np.ndarray], None]] = None,
         target_fps: int = 30,
     ):
         self.video_source = video_source
         self.on_event = on_event
         self.on_frame = on_frame
+        self.on_raw_frame = on_raw_frame
         self.target_fps = target_fps
         self.frame_interval = 1.0 / target_fps if target_fps > 0 else 0.033
 
@@ -253,7 +255,9 @@ class VisionWorker:
                     scan_msg = f"Auto-scanning for cameras{'.' * dot_count}"
                     cv2.putText(frame, scan_msg, (220, 420), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 230, 120), 1)
 
-                    if self.on_frame:
+                    if self.on_raw_frame:
+                        self.on_raw_frame(frame)
+                    elif self.on_frame:
                         encode_ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
                         if encode_ok:
                             self.on_frame(buffer.tobytes())
@@ -346,8 +350,10 @@ class VisionWorker:
                 is_session_active=(current_session is not None),
             )
 
-            # 6. Encode JPEG and emit to on_frame callback
-            if self.on_frame:
+            # 6. Emit frame callback (prefer raw ndarray for zero-copy local display)
+            if self.on_raw_frame:
+                self.on_raw_frame(annotated)
+            elif self.on_frame:
                 encode_ok, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
                 if encode_ok:
                     self.on_frame(buffer.tobytes())

@@ -79,12 +79,20 @@ class CameraNodeApp:
             confidence=confidence,
             on_event=self._on_vision_event,
             on_frame=self._on_vision_frame,
+            on_raw_frame=self._on_vision_raw_frame,
             target_fps=TARGET_FPS,
         )
 
+        self._latest_raw_frame: Optional[np.ndarray] = None
         self._latest_frame: Optional[bytes] = None
         self._frame_lock = threading.Lock()
         self._running = False
+
+        # Background sync queue & worker
+        self._sync_trigger = threading.Event()
+        self._sync_action: Optional[str] = None
+        self._sync_lock = threading.Lock()
+        self._sync_thread: Optional[threading.Thread] = None
 
     def _on_session_command(self, msg: dict):
         """Handle session commands from the dashboard WebSocket."""
@@ -109,7 +117,7 @@ class CameraNodeApp:
                             break
                 sec_name = self.sections[self.current_section_idx]["name"] if self.sections else "None"
                 print(f"[CameraNode] Synced {len(self.sections)} section(s) via WebSocket. Active: {sec_name}")
-                self._load_seats()
+                self._trigger_sync("RELOAD_SEATS")
             # Apply initial camera settings if present
             c_settings = msg.get("camera_settings")
             if c_settings:
@@ -175,86 +183,164 @@ class CameraNodeApp:
             daemon=True,
         ).start()
 
+    def _on_vision_raw_frame(self, frame: np.ndarray):
+        """Store latest numpy frame directly for OpenCV window display (zero-copy)."""
+        with self._frame_lock:
+            self._latest_raw_frame = frame
+
     def _on_vision_frame(self, jpeg_bytes: bytes):
-        """Store latest JPEG frame for OpenCV window display."""
+        """Fallback JPEG frame storage."""
         with self._frame_lock:
             self._latest_frame = jpeg_bytes
 
+    def _trigger_sync(self, action: str):
+        """Trigger background network action without stalling UI."""
+        with self._sync_lock:
+            self._sync_action = action
+            self._sync_trigger.set()
+
     def _load_sections(self):
-        """Fetch sections from dashboard."""
-        fetched = self.api_client.fetch_sections()
-        if fetched:
-            self.sections = fetched
-            matched = False
-            for i, sec in enumerate(self.sections):
-                if sec["id"] == self.section_id:
-                    self.current_section_idx = i
-                    matched = True
-                    break
-            if not matched and self.sections:
-                self.section_id = self.sections[0]["id"]
-                self.current_section_idx = 0
-            sec_name = self.sections[self.current_section_idx]["name"] if self.sections else "None"
-            print(f"[CameraNode] Loaded {len(self.sections)} section(s). Active: {sec_name}")
+        """Fetch sections from dashboard (runs in background thread)."""
+        try:
+            fetched = self.api_client.fetch_sections()
+            if fetched:
+                self.sections = fetched
+                matched = False
+                for i, sec in enumerate(self.sections):
+                    if sec["id"] == self.section_id:
+                        self.current_section_idx = i
+                        matched = True
+                        break
+                if not matched and self.sections:
+                    self.section_id = self.sections[0]["id"]
+                    self.current_section_idx = 0
+                sec_name = self.sections[self.current_section_idx]["name"] if self.sections else "None"
+                print(f"[CameraNode] Loaded {len(self.sections)} section(s). Active: {sec_name}")
+        except Exception as e:
+            print(f"[CameraNode] Could not load sections: {e}")
 
     def _load_seats(self):
-        """Fetch seat zones from dashboard and push to vision worker."""
-        seats_data = self.api_client.fetch_seats(self.section_id)
-        zones = [
-            SeatZone(
-                id=s["id"],
-                label=s["label"],
-                student_name=s["student_name"],
-                student_id_number=s.get("student_id_number", ""),
-                x_min=s["x_min"],
-                y_min=s["y_min"],
-                x_max=s["x_max"],
-                y_max=s["y_max"],
-                is_present=s["is_present"],
-                student_id=s.get("student_id"),
-                photo_path=s.get("photo_path"),
-                face_embedding=s.get("face_embedding"),
-                grid_row=s.get("grid_row", 0),
-                grid_col=s.get("grid_col", 0),
-            )
-            for s in seats_data
-        ]
-        self.vision_worker.set_seats(zones)
-        print(f"[CameraNode] Loaded {len(zones)} seat zone(s) for section {self.section_id}")
+        """Fetch seat zones from dashboard and push to vision worker (runs in background thread)."""
+        try:
+            seats_data = self.api_client.fetch_seats(self.section_id)
+            zones = [
+                SeatZone(
+                    id=s["id"],
+                    label=s["label"],
+                    student_name=s["student_name"],
+                    student_id_number=s.get("student_id_number", ""),
+                    x_min=s["x_min"],
+                    y_min=s["y_min"],
+                    x_max=s["x_max"],
+                    y_max=s["y_max"],
+                    is_present=s["is_present"],
+                    student_id=s.get("student_id"),
+                    photo_path=s.get("photo_path"),
+                    face_embedding=s.get("face_embedding"),
+                    grid_row=s.get("grid_row", 0),
+                    grid_col=s.get("grid_col", 0),
+                )
+                for s in seats_data
+            ]
+            self.vision_worker.set_seats(zones)
+            print(f"[CameraNode] Loaded {len(zones)} seat zone(s) for section {self.section_id}")
+        except Exception as e:
+            print(f"[CameraNode] Could not load seats: {e}")
 
     def _cycle_section(self):
-        """Cycle to next section."""
+        """Cycle to next section (instant in UI, updates seats in background)."""
         if not self.sections:
             return
         self.current_section_idx = (self.current_section_idx + 1) % len(self.sections)
         self.section_id = self.sections[self.current_section_idx]["id"]
-        print(f"[CameraNode] Switched to section: {self.sections[self.current_section_idx]['name']}")
-        self._load_seats()
+        sec_name = self.sections[self.current_section_idx].get("name", "Unknown")
+        print(f"[CameraNode] Switched to section: {sec_name}")
+        self._trigger_sync("CYCLE")
+
+    def _sync_worker_loop(self):
+        """
+        Dedicated background worker for all network communication with dashboard.
+        Keeps the OpenCV rendering and UI loop at locked 30–60 FPS without ever hitching.
+        """
+        # Initial check & load
+        try:
+            if self.api_client.check_connection():
+                print("[CameraNode] Dashboard connection OK")
+                self._load_sections()
+                self._load_seats()
+                active = self.api_client.fetch_active_session()
+                if active:
+                    self.vision_worker.set_session_id(active.get("id"))
+                    print(f"[CameraNode] Active session found: {active.get('id')}")
+            else:
+                print(f"[CameraNode] Dashboard not reachable at {self.dashboard_url} — running in offline mode")
+        except Exception as e:
+            print(f"[CameraNode] Initial connect check failed: {e}")
+
+        last_check_time = time.monotonic()
+        poll_interval = 8.0
+
+        while self._running:
+            # Wait for event signal or periodic poll timeout
+            triggered = self._sync_trigger.wait(timeout=1.0)
+            if not self._running:
+                break
+
+            action = None
+            if triggered:
+                with self._sync_lock:
+                    action = self._sync_action
+                    self._sync_action = None
+                    self._sync_trigger.clear()
+
+            now = time.monotonic()
+
+            try:
+                if action == "RELOAD_ALL":
+                    print("[CameraNode] Refreshing dashboard data...")
+                    self._load_sections()
+                    self._load_seats()
+                    active = self.api_client.fetch_active_session()
+                    if active:
+                        self.vision_worker.set_session_id(active.get("id"))
+                elif action in ("RELOAD_SEATS", "CYCLE"):
+                    self._load_seats()
+                elif now - last_check_time >= poll_interval:
+                    last_check_time = now
+                    if not self.api_client.is_connected:
+                        if self.api_client.check_connection():
+                            print("[CameraNode] Dashboard connected! Syncing...")
+                            self._load_sections()
+                            self._load_seats()
+                            active = self.api_client.fetch_active_session()
+                            if active:
+                                self.vision_worker.set_session_id(active.get("id"))
+                            poll_interval = 8.0
+                        else:
+                            poll_interval = min(20.0, poll_interval * 1.5)
+                    elif not self.sections:
+                        self._load_sections()
+                        if self.sections:
+                            self._load_seats()
+            except Exception as e:
+                print(f"[CameraNode] Background sync error: {e}")
+                time.sleep(1.0)
 
     def run(self):
         """Main loop — OpenCV window with live camera feed and HUD overlay."""
         print(f"[CameraNode] Connecting to dashboard: {self.dashboard_url}")
 
-        # Try initial connection
-        connected = self.api_client.check_connection()
-        if connected:
-            print("[CameraNode] Dashboard connection OK")
-            self._load_sections()
-            self._load_seats()
-            # Check for active session
-            active = self.api_client.fetch_active_session()
-            if active:
-                self.vision_worker.set_session_id(active["id"])
-                print(f"[CameraNode] Active session found: {active['id']}")
-        else:
-            print(f"[CameraNode] Dashboard not reachable at {self.dashboard_url} — running offline")
+        self._running = True
 
-        # Start edge WebSocket
+        # Start edge WebSocket (background thread)
         self.api_client.start_edge_websocket()
+
+        # Start background sync thread (all network I/O isolated here)
+        self._sync_thread = threading.Thread(target=self._sync_worker_loop, daemon=True, name="SyncWorker")
+        self._sync_thread.start()
 
         # Start vision worker
         self.vision_worker.start()
-        self._running = True
 
         window_name = "ClassTrack Camera Node"
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -262,29 +348,13 @@ class CameraNodeApp:
 
         print("[CameraNode] Press 'Q' to quit | 'C' to cycle sections | 'S' to sync seats | 'R' to reload")
 
-        last_sync_time = time.time()
-
         while self._running:
-            # Periodic background sync / reconnect check
-            now = time.time()
-            if now - last_sync_time > 3.0:
-                last_sync_time = now
-                if not self.api_client.is_connected:
-                    if self.api_client.check_connection():
-                        print("[CameraNode] Dashboard reconnected! Syncing...")
-                        self._load_sections()
-                        self._load_seats()
-                        active = self.api_client.fetch_active_session()
-                        if active:
-                            self.vision_worker.set_session_id(active.get("id"))
-                elif not self.sections:
-                    self._load_sections()
-                    self._load_seats()
-
             frame = None
             with self._frame_lock:
-                if self._latest_frame is not None:
-                    # Decode JPEG to numpy array
+                if self._latest_raw_frame is not None:
+                    frame = self._latest_raw_frame
+                elif self._latest_frame is not None:
+                    # Fallback decode JPEG
                     nparr = np.frombuffer(self._latest_frame, np.uint8)
                     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
@@ -300,12 +370,11 @@ class CameraNodeApp:
             elif key == ord("c") or key == ord("C"):
                 self._cycle_section()
             elif key == ord("s") or key == ord("S"):
-                self._load_seats()
-                print("[CameraNode] Seats reloaded from dashboard")
+                print("[CameraNode] Reloading seats in background...")
+                self._trigger_sync("RELOAD_SEATS")
             elif key == ord("r") or key == ord("R"):
-                self._load_sections()
-                self._load_seats()
-                print("[CameraNode] Full refresh from dashboard")
+                print("[CameraNode] Full refresh requested in background...")
+                self._trigger_sync("RELOAD_ALL")
 
             # Check if window was closed
             if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
@@ -313,6 +382,7 @@ class CameraNodeApp:
 
         # Cleanup
         self._running = False
+        self._sync_trigger.set()
         self.vision_worker.stop()
         self.api_client.stop_edge_websocket()
         cv2.destroyAllWindows()

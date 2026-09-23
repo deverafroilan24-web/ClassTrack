@@ -29,14 +29,23 @@ class DashboardAPIClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.on_session_command = on_session_command
-        self._connected = False
+        self._http_connected = False
+        self._ws_connected = False
         self._ws_thread: Optional[threading.Thread] = None
         self._ws_running = False
         self._session_id: Optional[str] = None
 
     @property
     def is_connected(self) -> bool:
-        return self._connected
+        return self._ws_connected or self._http_connected
+
+    @property
+    def is_ws_connected(self) -> bool:
+        return self._ws_connected
+
+    @property
+    def is_http_connected(self) -> bool:
+        return self._http_connected
 
     @property
     def session_id(self) -> Optional[str]:
@@ -137,10 +146,10 @@ class DashboardAPIClient:
         """Quick health check against the dashboard."""
         try:
             resp = requests.get(f"{self.base_url}/api/edge/status", headers=self._headers(), timeout=3)
-            self._connected = resp.status_code == 200
-            return self._connected
+            self._http_connected = resp.status_code == 200
+            return self._http_connected
         except Exception:
-            self._connected = False
+            self._http_connected = False
             return False
 
     # ------------------------------------------------------------------
@@ -159,7 +168,7 @@ class DashboardAPIClient:
         self._ws_running = False
 
     def _ws_loop(self):
-        """Background WebSocket connection loop with auto-reconnect."""
+        """Background WebSocket connection loop with auto-reconnect and backoff."""
         try:
             import websocket
         except ImportError:
@@ -168,13 +177,15 @@ class DashboardAPIClient:
 
         ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
         ws_url = f"{ws_url}/ws/edge"
+        backoff_sec = 3.0
 
         while self._ws_running:
             try:
                 ws = websocket.WebSocket()
                 ws_headers = {"X-Edge-Key": self.api_key} if self.api_key else {}
-                ws.connect(ws_url, timeout=10, header=ws_headers)
-                self._connected = True
+                ws.connect(ws_url, timeout=5, header=ws_headers)
+                self._ws_connected = True
+                backoff_sec = 3.0  # reset backoff on success
                 print(f"[APIClient] Connected to dashboard WebSocket: {ws_url}")
 
                 while self._ws_running:
@@ -198,9 +209,10 @@ class DashboardAPIClient:
             except Exception as e:
                 print(f"[APIClient] WS connection failed: {e}")
 
-            self._connected = False
+            self._ws_connected = False
             if self._ws_running:
-                time.sleep(3)  # Reconnect delay
+                time.sleep(backoff_sec)
+                backoff_sec = min(12.0, backoff_sec * 1.5)
 
     def _handle_ws_message(self, msg: dict):
         """Handle commands from the web dashboard."""
