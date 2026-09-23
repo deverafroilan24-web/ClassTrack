@@ -769,3 +769,198 @@ table.data-table tr:hover {
   margin-top: 8px;
   display: inline-block;
 }
+
+/* Current dashboard layout: keep every panel inside the available viewport. */
+html, body {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.view-panel,
+.view-panel > div,
+.responsive-table {
+  min-width: 0;
+}
+
+.responsive-table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.responsive-table table {
+  min-width: 650px;
+}
+
+#recitation-table-wrap {
+  max-height: calc(100dvh - 220px);
+  overflow-y: auto;
+}
+
+.nav-tab:focus-visible,
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+[tabindex="0"]:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+@media (max-width: 1023px) {
+  .nav-tab {
+    width: auto !important;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  aside nav {
+    scrollbar-width: thin;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  main {
+    overflow: visible;
+  }
+
+  #recitation-table-wrap {
+    max-height: none;
+  }
+}
+
+@media (max-width: 639px) {
+  #seat-zoom-controls {
+    max-width: 100%;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  #seat-zoom-controls > * {
+    margin-left: 0;
+  }
+
+  #seat-zoom-slider {
+    width: 54px;
+  }
+
+  #seating-actions,
+  #history-actions,
+  #report-actions {
+    width: 100%;
+  }
+
+  #seating-actions > button {
+    flex: 1 1 100%;
+    justify-content: center;
+  }
+
+  #history-actions > button,
+  #report-actions > button {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+
+  #architecture-flow > div {
+    max-width: 100%;
+  }
+
+  .responsive-table {
+    overflow: visible;
+  }
+
+  .responsive-table table,
+  .responsive-table tbody {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .responsive-table thead {
+    display: none;
+  }
+
+  .responsive-table tbody {
+    padding: 8px;
+  }
+
+  .responsive-table tr.responsive-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 12px;
+    margin-bottom: 10px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: #fff;
+    box-shadow: 0 1px 2px rgb(15 23 42 / 5%);
+  }
+
+  .responsive-table tr.responsive-row:last-child {
+    margin-bottom: 0;
+  }
+
+  .responsive-table tr.responsive-row td {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    text-align: left;
+    overflow-wrap: anywhere;
+  }
+
+  .responsive-table tr.responsive-row td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 3px;
+    color: #64748b;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.3;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+
+  .responsive-table tr.responsive-row td:nth-child(2),
+  .responsive-table tr.responsive-row td:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .responsive-table tr.responsive-row td:last-child > div {
+    justify-content: flex-start;
+    align-items: center;
+  }
+
+  .responsive-table tr.responsive-row td button {
+    min-height: 36px;
+    min-width: 36px;
+    padding: 7px 10px;
+  }
+
+  .responsive-table tr:not(.responsive-row) td {
+    display: block;
+    width: 100%;
+    white-space: normal;
+  }
+
+  #modal-register-student,
+  #modal-new-section,
+  #modal-session-details,
+  #modal-seating-settings,
+  #modal-confirm {
+    padding: 12px;
+  }
+
+  #modal-register-student > div,
+  #modal-confirm > div {
+    max-height: calc(100dvh - 24px);
+    overflow-y: auto;
+  }
+
+  #modal-session-details > div,
+  #modal-seating-settings > div {
+    max-height: calc(100dvh - 24px);
+  }
+
+  #toast-container {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+  }
+}
