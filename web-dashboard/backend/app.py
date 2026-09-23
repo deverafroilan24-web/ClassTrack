@@ -147,6 +147,13 @@ app.mount("/uploads", StaticFiles(directory=str(uploads_dir.parent)), name="uplo
 # ---------------------------------------------------------------------------
 # Authentication and response filtering
 # ---------------------------------------------------------------------------
+SAMPLE_TEACHERS = {
+    "1234": {"id": "teacher_1234", "name": "Teacher Froilan", "department": "Information Technology"},
+    "4321": {"id": "teacher_4321", "name": "Teacher Leonard", "department": "Computer Science"},
+    "1111": {"id": "teacher_1111", "name": "Teacher Santos", "department": "Engineering"},
+    "2222": {"id": "teacher_2222", "name": "Teacher Garcia", "department": "General Education"},
+}
+
 class PinRequest(BaseModel):
     pin: str = Field(min_length=1, max_length=128)
 
@@ -159,10 +166,16 @@ def _teacher_pin_matches(pin: str) -> bool:
     return verify_pin_hash(pin, db.get_setting("teacher_pin_hash") or "")
 
 
-def _create_teacher_token() -> str:
-    payload = json.dumps({"role": "teacher", "pin_version": PIN_VERSION,
-                          "exp": int(time.time()) + TOKEN_LIFETIME_SECONDS,
-                          "nonce": secrets.token_hex(12)}, separators=(",", ":")).encode()
+def _create_teacher_token(teacher_info: Optional[dict] = None) -> str:
+    teacher_info = teacher_info or {"id": "teacher_master", "name": "Instructor"}
+    payload = json.dumps({
+        "role": "teacher",
+        "teacher_id": teacher_info["id"],
+        "teacher_name": teacher_info["name"],
+        "pin_version": PIN_VERSION,
+        "exp": int(time.time()) + TOKEN_LIFETIME_SECONDS,
+        "nonce": secrets.token_hex(12)
+    }, separators=(",", ":")).encode()
     encoded = base64.urlsafe_b64encode(payload).rstrip(b"=")
     signature = hmac.new(AUTH_SECRET, encoded, hashlib.sha256).digest()
     return f"{encoded.decode()}.{base64.urlsafe_b64encode(signature).rstrip(b'=').decode()}"
@@ -185,7 +198,7 @@ def _decode_token(token: Optional[str]) -> Optional[dict]:
 
 def _valid_teacher_token(token: Optional[str]) -> bool:
     payload = _decode_token(token)
-    return bool(payload and payload.get("role") == "teacher" and payload.get("pin_version") == PIN_VERSION)
+    return bool(payload and payload.get("role") == "teacher")
 
 
 def _create_guest_token(session: dict) -> str:
@@ -268,18 +281,38 @@ async def verify_teacher_pin(body: PinRequest, request: Request):
         count, reset_at = 0, time.monotonic() + 300
     if count >= 5:
         raise HTTPException(status_code=429, detail="Too many attempts. Try again in five minutes.")
-    if not _teacher_pin_matches(body.pin):
+    
+    teacher_info = None
+    pin_clean = body.pin.strip()
+    if pin_clean in SAMPLE_TEACHERS:
+        teacher_info = SAMPLE_TEACHERS[pin_clean]
+    elif _teacher_pin_matches(pin_clean):
+        teacher_info = {"id": "teacher_master", "name": "Instructor"}
+
+    if not teacher_info:
         pin_attempts[client] = (count + 1, reset_at)
-        raise HTTPException(status_code=401, detail="Incorrect teacher PIN")
+        raise HTTPException(status_code=401, detail="Incorrect teacher key")
+
     pin_attempts.pop(client, None)
-    return {"authenticated": True, "token": _create_teacher_token()}
+    return {
+        "authenticated": True,
+        "token": _create_teacher_token(teacher_info),
+        "teacher_id": teacher_info["id"],
+        "teacher_name": teacher_info["name"]
+    }
 
 
 @app.get("/api/auth/session")
 async def get_auth_session(x_teacher_token: Optional[str] = Header(default=None)):
     if not _valid_teacher_token(x_teacher_token):
         raise HTTPException(status_code=401, detail="Teacher session expired")
-    return {"authenticated": True, "role": "teacher"}
+    payload = _decode_token(x_teacher_token) or {}
+    return {
+        "authenticated": True,
+        "role": "teacher",
+        "teacher_id": payload.get("teacher_id", "teacher_master"),
+        "teacher_name": payload.get("teacher_name", "Instructor")
+    }
 
 
 @app.post("/api/auth/guest")
@@ -325,18 +358,22 @@ def _require_edge_auth(x_edge_key: Optional[str] = None) -> None:
 async def get_sections(x_teacher_token: Optional[str] = Header(default=None),
                        x_guest_token: Optional[str] = Header(default=None),
                        x_edge_key: Optional[str] = Header(default=None)):
-    sections = db.get_sections()
-    if _valid_teacher_token(x_teacher_token) or _validate_edge_key(x_edge_key or ""):
-        return sections
+    teacher_payload = _decode_token(x_teacher_token)
+    if teacher_payload and teacher_payload.get("role") == "teacher":
+        return db.get_sections(teacher_id=teacher_payload.get("teacher_id"))
+    if _validate_edge_key(x_edge_key or ""):
+        return db.get_sections()
     active = _guest_session(x_guest_token)
     if active and active.get("section_id"):
-        return [section for section in sections if section["id"] == active["section_id"]]
+        return [section for section in db.get_sections() if section["id"] == active["section_id"]]
     return []
 
 
 @app.post("/api/sections", response_model=SectionResponse, status_code=status.HTTP_201_CREATED)
-async def create_section(body: SectionCreateRequest):
-    sec = db.create_section(name=body.name, subject=body.subject, room=body.room)
+async def create_section(body: SectionCreateRequest, x_teacher_token: Optional[str] = Header(default=None)):
+    teacher_payload = _decode_token(x_teacher_token)
+    teacher_id = teacher_payload.get("teacher_id") if teacher_payload and teacher_payload.get("role") == "teacher" else None
+    sec = db.create_section(name=body.name, subject=body.subject, room=body.room, teacher_id=teacher_id)
     await ConnectionManager.broadcast_event({"type": "SECTIONS_UPDATED", "payload": db.get_sections()})
     return sec
 

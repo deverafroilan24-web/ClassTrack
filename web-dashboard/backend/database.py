@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS sections (
     name TEXT NOT NULL,
     subject TEXT NOT NULL,
     room TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    teacher_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS students (
@@ -209,8 +210,12 @@ class DatabaseManager:
         with self._connect() as conn:
             if self.is_postgres:
                 conn.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS guest_code TEXT")
-            elif "guest_code" not in {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}:
-                conn.execute("ALTER TABLE sessions ADD COLUMN guest_code TEXT")
+                conn.execute("ALTER TABLE sections ADD COLUMN IF NOT EXISTS teacher_id TEXT")
+            else:
+                if "guest_code" not in {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}:
+                    conn.execute("ALTER TABLE sessions ADD COLUMN guest_code TEXT")
+                if "teacher_id" not in {row[1] for row in conn.execute("PRAGMA table_info(sections)")}:
+                    conn.execute("ALTER TABLE sections ADD COLUMN teacher_id TEXT")
             for session in conn.execute("SELECT id FROM sessions WHERE ended_at IS NULL AND guest_code IS NULL").fetchall():
                 conn.execute("UPDATE sessions SET guest_code = ? WHERE id = ?",
                              (secrets.token_hex(4).upper(), session["id"]))
@@ -322,32 +327,37 @@ class DatabaseManager:
     # -------------------------------------------------------------
     # SECTIONS
     # -------------------------------------------------------------
-    def get_sections(self) -> List[Dict[str, Any]]:
+    def get_sections(self, teacher_id: Optional[str] = None) -> List[Dict[str, Any]]:
         with self._connect() as conn:
-            cursor = conn.execute(
-                """
+            query = """
                 SELECT 
-                    sec.id, sec.name, sec.subject, sec.room, sec.created_at,
+                    sec.id, sec.name, sec.subject, sec.room, sec.created_at, sec.teacher_id,
                     COUNT(DISTINCT s.id) as student_count,
                     COUNT(DISTINCT sess.id) as session_count
                 FROM sections sec
                 LEFT JOIN seats s ON sec.id = s.section_id
                 LEFT JOIN sessions sess ON sec.id = sess.section_id
+            """
+            params = ()
+            if teacher_id:
+                query += " WHERE (sec.teacher_id IS NULL OR sec.teacher_id = ?) "
+                params = (teacher_id,)
+            query += """
                 GROUP BY sec.id
                 ORDER BY sec.name ASC
-                """
-            )
+            """
+            cursor = conn.execute(query, params)
             return [dict(r) for r in cursor.fetchall()]
 
-    def create_section(self, name: str, subject: str, room: str) -> Dict[str, Any]:
+    def create_section(self, name: str, subject: str, room: str, teacher_id: Optional[str] = None) -> Dict[str, Any]:
         sec_id = f"sec_{int(time.time())}_{uuid.uuid4().hex[:4]}"
         now = _now_iso()
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO sections (id, name, subject, room, created_at) VALUES (?, ?, ?, ?, ?)",
-                (sec_id, name, subject, room, now),
+                "INSERT INTO sections (id, name, subject, room, created_at, teacher_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (sec_id, name, subject, room, now, teacher_id),
             )
-        return {"id": sec_id, "name": name, "subject": subject, "room": room, "created_at": now}
+        return {"id": sec_id, "name": name, "subject": subject, "room": room, "created_at": now, "teacher_id": teacher_id}
 
     def delete_section(self, section_id: str) -> bool:
         with self._connect(foreign_keys=False) as conn:

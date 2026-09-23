@@ -16,6 +16,7 @@ class SectionResponse(BaseModel):
     created_at: str
     student_count: int = 0
     session_count: int = 0
+    teacher_id: Optional[str] = None
 
 
 class StudentRegisterRequest(BaseModel):

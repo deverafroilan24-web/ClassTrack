@@ -42,6 +42,7 @@ let activeSession = null;
 let currentLedger = [];
 let currentPodiumList = [];
 let teacherToken = sessionStorage.getItem("classtrack.teacherToken") || "";
+let teacherName = sessionStorage.getItem("classtrack.teacherName") || "";
 let guestToken = sessionStorage.getItem("classtrack.guestToken") || "";
 let guestAccessCode = "";
 let guestAccessSessionId = "";
@@ -77,7 +78,7 @@ function applyRole(nextRole) {
   role = nextRole;
   document.body.classList.toggle("guest-mode", role === "guest");
   document.getElementById("role-controls").classList.remove("hidden");
-  document.getElementById("role-badge").textContent = role === "teacher" ? "Teacher Mode" : "Guest View-Only Mode";
+  document.getElementById("role-badge").textContent = role === "teacher" ? (teacherName ? `Teacher: ${teacherName}` : "Teacher Mode") : "Guest View-Only Mode";
   document.getElementById("btn-switch-teacher").classList.toggle("hidden", role === "teacher");
   document.getElementById("btn-lock-teacher").classList.toggle("hidden", role !== "teacher");
   if (role === "guest") showView("class");
@@ -163,9 +164,11 @@ window.submitTeacherLogin = async function (event) {
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "Teacher login failed");
     teacherToken = data.token;
+    teacherName = data.teacher_name || "";
     guestToken = "";
     authGeneration += 1;
     sessionStorage.setItem("classtrack.teacherToken", teacherToken);
+    sessionStorage.setItem("classtrack.teacherName", teacherName);
     sessionStorage.removeItem("classtrack.guestToken");
     pinInput.value = "";
     document.getElementById("welcome-portal").classList.add("hidden");
@@ -227,6 +230,9 @@ async function restoreAuth() {
     try {
       const response = await originalFetch("/api/auth/session", { headers: { "X-Teacher-Token": teacherToken } });
       if (response.ok) {
+        const sessionData = await response.json();
+        teacherName = sessionData.teacher_name || teacherName;
+        sessionStorage.setItem("classtrack.teacherName", teacherName);
         document.getElementById("welcome-portal").classList.add("hidden");
         applyRole("teacher");
         return true;
