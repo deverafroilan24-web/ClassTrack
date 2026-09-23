@@ -93,6 +93,7 @@ class PodiumQueueManager:
             e.seat_id: {
                 "queue_pos": e.queue_position,
                 "delta_ms": e.delta_ms,
+                "raised_at_ms": e.timestamp_ms,
             }
             for e in entries
         }

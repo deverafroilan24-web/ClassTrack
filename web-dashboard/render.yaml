@@ -12,4 +12,5 @@ services:
         value: hand_tracking.db
       - key: EDGE_API_KEY
         generateValue: true
-
+      - key: AUTH_SECRET
+        generateValue: true

@@ -1,7 +1,9 @@
 import csv
+import hashlib
 import io
 import os
 import re
+import secrets
 import sqlite3
 import time
 import uuid
@@ -86,6 +88,17 @@ CREATE INDEX IF NOT EXISTS idx_students_section ON students (section_id);
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def verify_pin_hash(pin: str, stored: str) -> bool:
+    try:
+        algorithm, rounds, salt_hex, digest_hex = stored.split("$")
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", pin.encode(), bytes.fromhex(salt_hex), int(rounds))
+        return secrets.compare_digest(digest, bytes.fromhex(digest_hex))
+    except (ValueError, TypeError):
+        return False
 
 
 class PgCursorWrapper:
@@ -178,6 +191,33 @@ class DatabaseManager:
             if self.db_path.parent != Path("."):
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self.init_db()
+        self.init_auth_schema()
+
+    def init_auth_schema(self) -> None:
+        """Idempotent auth migration for both SQLite and PostgreSQL."""
+        timestamp_type = "TIMESTAMPTZ" if self.is_postgres else "TEXT"
+        pin = os.getenv("TEACHER_PIN") or "1234"
+        with self._connect() as conn:
+            conn.execute(
+                f"CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at {timestamp_type} NOT NULL)"
+            )
+            existing = conn.execute("SELECT value FROM app_settings WHERE key = ?", ("teacher_pin_hash",)).fetchone()
+            if existing and (not os.getenv("TEACHER_PIN") or verify_pin_hash(pin, existing["value"])):
+                return
+            salt = secrets.token_bytes(16)
+            digest = hashlib.pbkdf2_hmac("sha256", pin.encode(), salt, 200_000)
+            pin_hash = f"pbkdf2_sha256$200000${salt.hex()}${digest.hex()}"
+            if existing:
+                conn.execute("UPDATE app_settings SET value = ?, updated_at = ? WHERE key = ?",
+                             (pin_hash, _now_iso(), "teacher_pin_hash"))
+            else:
+                conn.execute("INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO NOTHING",
+                             ("teacher_pin_hash", pin_hash, _now_iso()))
+
+    def get_setting(self, key: str) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+            return row["value"] if row else None
 
     @contextmanager
     def _connect(self, foreign_keys: bool = True):
@@ -1145,6 +1185,7 @@ class DatabaseManager:
                     "latest_event_id": None,
                     "latest_queue_pos": None,
                     "latest_delta_ms": 0,
+                    "raised_at_ms": None,
                     "latest_status": "IDLE",
                     "latest_reason_code": None,
                     "latest_earned_point": None,
@@ -1185,22 +1226,26 @@ class DatabaseManager:
                     live_status = "VALID"
                     live_queue_pos = pod_info.get("queue_pos")
                     live_delta_ms = pod_info.get("delta_ms", 0)
+                    raised_at_ms = pod_info.get("raised_at_ms")
                     live_reason = "VALID_HAND_RAISE"
                 else:
                     live_status = "IDLE"
                     live_queue_pos = None
                     live_delta_ms = 0
+                    raised_at_ms = None
                     live_reason = None
             else:
                 if latest and latest["status"] == "VALID" and latest.get("reason_code") != "HAND_LOWERED":
                     live_status = "VALID"
                     live_queue_pos = latest.get("queue_pos")
                     live_delta_ms = latest.get("delta_ms", 0)
+                    raised_at_ms = latest.get("timestamp_ms")
                     live_reason = latest.get("reason_code")
                 else:
                     live_status = "IDLE"
                     live_queue_pos = None
                     live_delta_ms = 0
+                    raised_at_ms = None
                     live_reason = None
 
             ledger.append({
@@ -1217,6 +1262,7 @@ class DatabaseManager:
                 "latest_event_id": latest["id"] if latest else None,
                 "latest_queue_pos": live_queue_pos,
                 "latest_delta_ms": live_delta_ms,
+                "raised_at_ms": raised_at_ms,
                 "latest_status": live_status,
                 "latest_reason_code": live_reason,
                 "latest_earned_point": latest.get("earned_point") if latest else None,

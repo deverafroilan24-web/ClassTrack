@@ -10,20 +10,25 @@ ZERO dependencies on: torch, ultralytics, cv2, mediapipe, or any .pt model files
 
 import asyncio
 import base64
+import binascii
+import hashlib
+import hmac
 import json
 import os
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from fastapi import FastAPI, Header, HTTPException, Response, WebSocket, WebSocketDisconnect, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi import FastAPI, Header, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+from dotenv import load_dotenv
 
-from backend.database import DatabaseManager
+from backend.database import DatabaseManager, verify_pin_hash
 from backend.podium_queue import PodiumQueueManager
 from backend.schemas import (
     EdgeEventIngest,
@@ -46,12 +51,17 @@ from backend.schemas import (
 # ---------------------------------------------------------------------------
 # Global managers
 # ---------------------------------------------------------------------------
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "hand_tracking.db")
 db = DatabaseManager(DATABASE_PATH)
 podium_queue = PodiumQueueManager()
+PIN_VERSION = hashlib.sha256((os.getenv("TEACHER_PIN") or db.get_setting("teacher_pin_hash") or "").encode()).hexdigest()[:16]
 
-# Edge authentication (simple shared secret)
+# Server secrets. A generated auth secret invalidates tokens after a restart.
 EDGE_API_KEY = os.getenv("EDGE_API_KEY", "")
+AUTH_SECRET = (os.getenv("AUTH_SECRET") or secrets.token_urlsafe(32)).encode()
+TOKEN_LIFETIME_SECONDS = 8 * 60 * 60
+pin_attempts: Dict[str, tuple[int, float]] = {}
 
 event_subscribers: Set[WebSocket] = set()
 edge_subscribers: Set[WebSocket] = set()
@@ -62,7 +72,10 @@ class ConnectionManager:
     async def broadcast_event(event_dict: dict):
         if not event_subscribers:
             return
-        msg = json.dumps(event_dict)
+        public_event = _guest_safe(event_dict)
+        if public_event.get("type") == "STUDENTS_UPDATED":
+            public_event.pop("payload", None)
+        msg = json.dumps(public_event)
         dead = []
         for ws in list(event_subscribers):
             try:
@@ -106,34 +119,123 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 uploads_dir = Path(__file__).resolve().parent.parent / "static" / "uploads" / "students"
 uploads_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(uploads_dir.parent)), name="uploads")
 
 
 # ---------------------------------------------------------------------------
-# HELPER: Validate edge API key
+# Authentication and response filtering
 # ---------------------------------------------------------------------------
+class PinRequest(BaseModel):
+    pin: str = Field(min_length=1, max_length=128)
+
+
+def _teacher_pin_matches(pin: str) -> bool:
+    return verify_pin_hash(pin, db.get_setting("teacher_pin_hash") or "")
+
+
+def _create_teacher_token() -> str:
+    payload = json.dumps({"role": "teacher", "pin_version": PIN_VERSION,
+                          "exp": int(time.time()) + TOKEN_LIFETIME_SECONDS,
+                          "nonce": secrets.token_hex(12)}, separators=(",", ":")).encode()
+    encoded = base64.urlsafe_b64encode(payload).rstrip(b"=")
+    signature = hmac.new(AUTH_SECRET, encoded, hashlib.sha256).digest()
+    return f"{encoded.decode()}.{base64.urlsafe_b64encode(signature).rstrip(b'=').decode()}"
+
+
+def _valid_teacher_token(token: Optional[str]) -> bool:
+    if not token:
+        return False
+    try:
+        encoded, signature = token.split(".", 1)
+        expected = hmac.new(AUTH_SECRET, encoded.encode(), hashlib.sha256).digest()
+        actual = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
+        payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+        return (hmac.compare_digest(expected, actual) and payload.get("role") == "teacher"
+                and payload.get("pin_version") == PIN_VERSION
+                and int(payload.get("exp", 0)) > time.time())
+    except (ValueError, TypeError, KeyError, UnicodeError, binascii.Error):
+        return False
+
+
+def _teacher_or_edge(request: Request) -> bool:
+    return (_valid_teacher_token(request.headers.get("x-teacher-token"))
+            or _validate_edge_key(request.headers.get("x-edge-key", "")))
+
+
+def _guest_safe(value):
+    """Remove private student fields from every public REST/WS payload."""
+    hidden = {"student_id_number", "student_id", "photo_path", "face_embedding", "students",
+              "latest_event_id", "face_similarity", "verification_status", "event_id"}
+    if isinstance(value, dict):
+        return {key: _guest_safe(item) for key, item in value.items() if key not in hidden}
+    if isinstance(value, list):
+        return [_guest_safe(item) for item in value]
+    return value
+
+
+@app.middleware("http")
+async def enforce_teacher_access(request: Request, call_next):
+    path = request.url.path
+    method = request.method
+    if path.startswith("/uploads/") and not _teacher_or_edge(request):
+        return JSONResponse({"detail": "Teacher authentication required"}, status_code=401)
+    if path.startswith("/api/"):
+        public_get = {"/api/sections", "/api/seats", "/api/sessions/active",
+                      "/api/recitation/ledger", "/api/edge/status"}
+        public_post = {"/api/auth/verify-pin", "/api/events/ingest"}
+        if method == "POST" and path == "/api/events/ingest":
+            if not EDGE_API_KEY:
+                return JSONResponse({"detail": "EDGE_API_KEY is not configured"}, status_code=503)
+            if not _validate_edge_key(request.headers.get("x-edge-key", "")):
+                return JSONResponse({"detail": "Invalid or missing X-Edge-Key"}, status_code=401)
+        if method == "GET" and path in public_get:
+            pass
+        elif method == "GET" and path == "/api/auth/session":
+            pass
+        elif method == "POST" and path in public_post:
+            pass
+        elif method == "PUT" and path == "/api/seats" and _teacher_or_edge(request):
+            pass
+        elif not _valid_teacher_token(request.headers.get("x-teacher-token")):
+            return JSONResponse({"detail": "Teacher authentication required"}, status_code=401)
+    response = await call_next(request)
+    if path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/api/auth/verify-pin")
+async def verify_teacher_pin(body: PinRequest, request: Request):
+    client = request.client.host if request.client else "unknown"
+    count, reset_at = pin_attempts.get(client, (0, 0.0))
+    if time.monotonic() >= reset_at:
+        count, reset_at = 0, time.monotonic() + 300
+    if count >= 5:
+        raise HTTPException(status_code=429, detail="Too many attempts. Try again in five minutes.")
+    if not _teacher_pin_matches(body.pin):
+        pin_attempts[client] = (count + 1, reset_at)
+        raise HTTPException(status_code=401, detail="Incorrect teacher PIN")
+    pin_attempts.pop(client, None)
+    return {"authenticated": True, "token": _create_teacher_token()}
+
+
+@app.get("/api/auth/session")
+async def get_auth_session(x_teacher_token: Optional[str] = Header(default=None)):
+    if not _valid_teacher_token(x_teacher_token):
+        raise HTTPException(status_code=401, detail="Teacher session expired")
+    return {"authenticated": True, "role": "teacher"}
+
+
 def _validate_edge_key(provided_key: str) -> bool:
-    """Returns True if edge auth is disabled (no key set) or key matches."""
-    if not EDGE_API_KEY:
-        return True  # No auth configured
-    return provided_key == EDGE_API_KEY
+    return bool(EDGE_API_KEY) and secrets.compare_digest(provided_key or "", EDGE_API_KEY)
 
 
 def _require_edge_auth(x_edge_key: Optional[str] = None) -> None:
-    """Enforce shared-secret auth on edge ingest when EDGE_API_KEY is set."""
     if not EDGE_API_KEY:
-        return
-    if x_edge_key != EDGE_API_KEY:
+        raise HTTPException(status_code=503, detail="EDGE_API_KEY is not configured")
+    if not _validate_edge_key(x_edge_key or ""):
         raise HTTPException(status_code=401, detail="Invalid or missing X-Edge-Key")
 
 
@@ -358,17 +460,19 @@ async def register_student(section_id: str, body: StudentRegisterRequest):
 
 
 @app.get("/api/recitation/ledger")
-async def get_recitation_ledger(session_id: Optional[str] = None, section_id: Optional[str] = None):
+async def get_recitation_ledger(session_id: Optional[str] = None, section_id: Optional[str] = None,
+                                x_teacher_token: Optional[str] = Header(default=None)):
     # If session_id not explicitly provided, default to active session
     active = db.get_active_session()
     target_session_id = session_id if session_id is not None else (active["id"] if active else None)
     active_podium_map = podium_queue.get_podium_map()
-    return db.get_recitation_ledger(
+    ledger = db.get_recitation_ledger(
         session_id=target_session_id,
         section_id=section_id,
         active_session_required=True,
         active_podium_map=active_podium_map,
     )
+    return ledger if _valid_teacher_token(x_teacher_token) else _guest_safe(ledger)
 
 
 @app.get("/api/sessions")
@@ -434,8 +538,13 @@ async def stop_session():
 
 
 @app.get("/api/seats", response_model=List[SeatSchema])
-async def get_seats(section_id: Optional[str] = None):
-    return db.get_seats(section_id=section_id)
+async def get_seats(section_id: Optional[str] = None,
+                    x_teacher_token: Optional[str] = Header(default=None),
+                    x_edge_key: Optional[str] = Header(default=None)):
+    seats = db.get_seats(section_id=section_id)
+    if _valid_teacher_token(x_teacher_token) or _validate_edge_key(x_edge_key or ""):
+        return seats
+    return _guest_safe(seats)
 
 
 @app.put("/api/seats", response_model=List[SeatSchema])
@@ -711,7 +820,6 @@ async def ws_events(websocket: WebSocket):
         active_session = db.get_active_session()
         sections = db.get_sections()
         seats = db.get_seats()
-        events = db.get_events(session_id=active_session["id"] if active_session else None, limit=20)
         await websocket.send_text(
             json.dumps(
                 {
@@ -719,8 +827,7 @@ async def ws_events(websocket: WebSocket):
                     "payload": {
                         "active_session": active_session,
                         "sections": sections,
-                        "seats": seats,
-                        "events": events,
+                        "seats": _guest_safe(seats),
                         "edge_nodes": len(edge_subscribers),
                     },
                 }
@@ -746,6 +853,9 @@ async def ws_edge(websocket: WebSocket):
     - Stream gesture events in real-time
     - Get seat configuration updates
     """
+    if not EDGE_API_KEY or not _validate_edge_key(websocket.headers.get("x-edge-key", "")):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     edge_subscribers.add(websocket)
     print(f"[Edge] Camera Node connected. Total nodes: {len(edge_subscribers)}")

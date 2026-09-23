@@ -172,7 +172,8 @@ class DashboardAPIClient:
         while self._ws_running:
             try:
                 ws = websocket.WebSocket()
-                ws.connect(ws_url, timeout=10)
+                ws_headers = {"X-Edge-Key": self.api_key} if self.api_key else {}
+                ws.connect(ws_url, timeout=10, header=ws_headers)
                 self._connected = True
                 print(f"[APIClient] Connected to dashboard WebSocket: {ws_url}")
 

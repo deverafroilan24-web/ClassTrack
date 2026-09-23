@@ -41,6 +41,134 @@ let draggedFromSeatId = null;
 let activeSession = null;
 let currentLedger = [];
 let currentPodiumList = [];
+let teacherToken = sessionStorage.getItem("classtrack.teacherToken") || "";
+let role = "guest";
+let authGeneration = 0;
+
+const originalFetch = window.fetch.bind(window);
+window.fetch = function (input, options = {}) {
+  const url = typeof input === "string" ? input : input.url;
+  if (!teacherToken || !url.startsWith("/api/")) return originalFetch(input, options);
+  const headers = new Headers(options.headers || {});
+  headers.set("X-Teacher-Token", teacherToken);
+  const requestToken = teacherToken;
+  return originalFetch(input, { ...options, headers }).then((response) => {
+    if (response.status === 401 && role === "teacher" && requestToken === teacherToken) {
+      enterGuestMode();
+      showToast("Teacher session expired. Please log in again.", "warning");
+    }
+    return response;
+  });
+};
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character]);
+}
+
+function applyRole(nextRole) {
+  role = nextRole;
+  document.body.classList.toggle("guest-mode", role === "guest");
+  document.getElementById("role-controls").classList.remove("hidden");
+  document.getElementById("role-badge").textContent = role === "teacher" ? "Teacher Mode" : "Guest View-Only Mode";
+  document.getElementById("btn-switch-teacher").classList.toggle("hidden", role === "teacher");
+  document.getElementById("btn-lock-teacher").classList.toggle("hidden", role !== "teacher");
+  if (role === "guest") showView("class");
+  updateSessionUI();
+  renderRecitationLedger();
+  renderClassroomDesks();
+  renderGuestDashboard();
+}
+
+window.showWelcomeChoices = function () {
+  document.getElementById("welcome-portal").classList.remove("hidden");
+  document.getElementById("welcome-choices").classList.remove("hidden");
+  document.getElementById("teacher-login-form").classList.add("hidden");
+  document.getElementById("teacher-pin-input").value = "";
+  document.getElementById("teacher-login-error").classList.add("hidden");
+};
+
+window.showTeacherLogin = function () {
+  document.getElementById("welcome-portal").classList.remove("hidden");
+  document.getElementById("welcome-choices").classList.add("hidden");
+  document.getElementById("teacher-login-form").classList.remove("hidden");
+  document.getElementById("teacher-login-error").classList.add("hidden");
+  document.getElementById("teacher-pin-input").focus();
+};
+
+window.enterGuestMode = function () {
+  authGeneration += 1;
+  teacherToken = "";
+  sessionStorage.removeItem("classtrack.teacherToken");
+  currentSeats = [];
+  currentStudents = [];
+  currentLedger = [];
+  currentHeatmapData = null;
+  seatingViewMode = "seating";
+  sessionsHistoryList = [];
+  ["recitation-tbody", "section-roster-tbody", "sessions-history-tbody", "reports-tbody", "modal-session-tbody"]
+    .forEach((id) => { const element = document.getElementById(id); if (element) element.innerHTML = ""; });
+  ["modal-register-student", "modal-new-section", "modal-session-details", "modal-seating-settings"]
+    .forEach((id) => document.getElementById(id)?.classList.add("hidden"));
+  document.getElementById("welcome-portal").classList.add("hidden");
+  applyRole("guest");
+  fetchSeats();
+  fetchRecitationLedger();
+};
+
+window.lockTeacherMode = function () {
+  enterGuestMode();
+  showToast("Teacher controls locked", "info");
+};
+
+window.submitTeacherLogin = async function (event) {
+  event.preventDefault();
+  const pinInput = document.getElementById("teacher-pin-input");
+  const error = document.getElementById("teacher-login-error");
+  const submit = document.getElementById("teacher-login-submit");
+  submit.disabled = true;
+  error.classList.add("hidden");
+  try {
+    const response = await originalFetch("/api/auth/verify-pin", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin: pinInput.value }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Teacher login failed");
+    teacherToken = data.token;
+    authGeneration += 1;
+    sessionStorage.setItem("classtrack.teacherToken", teacherToken);
+    pinInput.value = "";
+    document.getElementById("welcome-portal").classList.add("hidden");
+    applyRole("teacher");
+    await Promise.all([fetchSeats(), fetchRecitationLedger(), fetchSessionsHistory()]);
+  } catch (loginError) {
+    error.textContent = loginError.message;
+    error.classList.remove("hidden");
+  } finally {
+    submit.disabled = false;
+  }
+};
+
+async function restoreAuth() {
+  if (teacherToken) {
+    try {
+      const response = await fetch("/api/auth/session");
+      if (response.ok) {
+        document.getElementById("welcome-portal").classList.add("hidden");
+        applyRole("teacher");
+        return;
+      }
+    } catch (error) {
+      console.warn("Teacher session validation failed", error);
+    }
+    teacherToken = "";
+    sessionStorage.removeItem("classtrack.teacherToken");
+  }
+  applyRole("guest");
+  showWelcomeChoices();
+}
 
 // ============================================================================
 // STUDENT INITIALS & AVATAR PALETTE
@@ -181,6 +309,7 @@ window.showConfirmModal = function ({
 // 1. NAVIGATION CONTROLLER
 // ============================================================================
 window.showView = function (viewName) {
+  if (role === "guest" && !["class", "seating"].includes(viewName)) viewName = "class";
   document.querySelectorAll(".nav-tab").forEach((tab) => {
     const isActive = tab.dataset.view === viewName;
     tab.setAttribute("aria-current", isActive ? "page" : "false");
@@ -224,6 +353,56 @@ function labelResponsiveCells(row, labels) {
     cell.dataset.label = labels[index] || "";
   });
 }
+
+function renderGuestDashboard() {
+  const podium = document.getElementById("guest-podium-list");
+  const leaderboard = document.getElementById("guest-leaderboard-list");
+  const seating = document.getElementById("guest-seating-grid");
+  if (!podium || !leaderboard || !seating) return;
+
+  const visibleSeatIds = new Set(currentSeats.map((seat) => seat.id));
+  const visibleLedger = currentLedger.filter((student) => visibleSeatIds.has(student.seat_id));
+  const raised = visibleLedger
+    .filter((student) => student.latest_status === "VALID" && student.latest_queue_pos)
+    .sort((a, b) => a.latest_queue_pos - b.latest_queue_pos);
+  podium.innerHTML = raised.length
+    ? raised.slice(0, 3).map((student) => `
+      <div class="guest-podium-item">
+        <span class="guest-podium-rank">#${Number(student.latest_queue_pos)}</span>
+        <span class="guest-podium-name">${escapeHtml(student.student_name)} <small class="block text-slate-500 font-medium">${escapeHtml(student.label)}</small></span>
+        <span class="guest-podium-time" data-raised-at="${Number(student.raised_at_ms) || 0}">0s</span>
+      </div>`).join("")
+    : '<p class="guest-empty">No hands raised yet.</p>';
+
+  const leaders = visibleLedger
+    .filter((student) => student.student_name && !student.student_name.startsWith("Empty ("))
+    .sort((a, b) => (b.total_points || 0) - (a.total_points || 0) || (b.total_raises || 0) - (a.total_raises || 0));
+  leaderboard.innerHTML = leaders.length
+    ? leaders.slice(0, 8).map((student, index) => `
+      <div class="guest-leader-item"><span class="guest-podium-rank">${index + 1}</span>
+        <span class="guest-podium-name">${escapeHtml(student.student_name)}</span>
+        <span class="guest-leader-points">${Number(student.total_points) || 0} pts</span></div>`).join("")
+    : '<p class="guest-empty">No student scores available yet.</p>';
+
+  const raisedSeats = new Set(raised.map((student) => student.seat_id));
+  seating.innerHTML = currentSeats.length
+    ? currentSeats.map((seat) => `
+      <div class="guest-seat ${raisedSeats.has(seat.id) ? "raised" : ""}">
+        <span class="guest-seat-label">${escapeHtml(seat.label)}${raisedSeats.has(seat.id) ? " · HAND RAISED" : ""}</span>
+        <span class="guest-seat-name">${escapeHtml(seat.student_name || "Empty desk")}</span>
+      </div>`).join("")
+    : '<p class="guest-empty">Seating will appear when a class section is selected.</p>';
+  updateGuestTimers();
+}
+
+function updateGuestTimers() {
+  document.querySelectorAll("#guest-podium-list [data-raised-at]").forEach((element) => {
+    const raisedAt = Number(element.dataset.raisedAt);
+    const seconds = raisedAt ? Math.max(0, Math.floor((Date.now() - raisedAt) / 1000)) : 0;
+    element.textContent = `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+  });
+}
+setInterval(updateGuestTimers, 1000);
 
 // Clock
 function startClock() {
@@ -695,9 +874,12 @@ window.submitNewSection = async function (e) {
 // ============================================================================
 async function fetchRecitationLedger() {
   try {
+    const generation = authGeneration;
     const sessParam = activeSession ? `session_id=${activeSession.id}&` : "";
     const res = await fetch(`/api/recitation/ledger?${sessParam}section_id=${currentSectionId}`);
-    currentLedger = await res.json();
+    const ledger = await res.json();
+    if (generation !== authGeneration) return;
+    currentLedger = ledger;
     renderRecitationLedger();
   } catch (err) {
     console.error("Failed to load recitation ledger:", err);
@@ -705,6 +887,7 @@ async function fetchRecitationLedger() {
 }
 
 function renderRecitationLedger() {
+  renderGuestDashboard();
   if (!recitationTbody) return;
   recitationTbody.innerHTML = "";
 
@@ -878,23 +1061,26 @@ window.awardDirectStudent = async function (seatId) {
 // ============================================================================
 async function fetchSeats() {
   try {
+    const generation = authGeneration;
     const [seatsRes, studentsRes] = await Promise.all([
       fetch(`/api/seats?section_id=${currentSectionId}`),
-      fetch(`/api/sections/${currentSectionId}/students`),
+      role === "teacher" && currentSectionId
+        ? fetch(`/api/sections/${currentSectionId}/students`)
+        : Promise.resolve(null),
     ]);
 
-    if (seatsRes.ok) {
-      currentSeats = await seatsRes.json();
-    }
-    if (studentsRes.ok) {
-      currentStudents = await studentsRes.json();
-    }
+    const seats = seatsRes.ok ? await seatsRes.json() : null;
+    const students = studentsRes?.ok ? await studentsRes.json() : null;
+    if (generation !== authGeneration) return;
+    if (seats) currentSeats = seats;
+    currentStudents = students || [];
 
     if (seatingViewMode === "heatmap") {
       await fetchHeatmapData();
     }
 
     renderClassroomDesks();
+    renderGuestDashboard();
     renderUnassignedStudentTray();
     renderSectionRoster();
     populateCalibrationInputs();
@@ -1730,7 +1916,9 @@ window.switchReportsSubTab = function (tab) {
 };
 
 async function fetchSessionsHistory() {
+  if (role !== "teacher") return;
   try {
+    const generation = authGeneration;
     const secFilter = document.getElementById("history-section-filter");
     const dateFilter = document.getElementById("history-date-filter");
     const secVal = secFilter ? secFilter.value : "";
@@ -1743,7 +1931,9 @@ async function fetchSessionsHistory() {
     const qs = params.toString() ? `?${params.toString()}` : "";
     const res = await fetch(`/api/sessions${qs}`);
     if (!res.ok) return;
-    sessionsHistoryList = await res.json();
+    const sessions = await res.json();
+    if (generation !== authGeneration || role !== "teacher") return;
+    sessionsHistoryList = sessions;
     renderSessionsHistory();
 
     const countBadge = document.getElementById("history-count-badge");
@@ -1877,10 +2067,13 @@ window.deleteClassSession = async function (sessionId) {
 };
 
 window.openSessionDetailsModal = async function (sessionId) {
+  if (role !== "teacher") return;
+  const generation = authGeneration;
   try {
     const res = await fetch(`/api/sessions/${sessionId}`);
     if (!res.ok) throw new Error("Failed to load session details");
     const data = await res.json();
+    if (generation !== authGeneration || role !== "teacher") return;
 
     document.getElementById("modal-session-title").textContent = data.title;
     document.getElementById("modal-session-subtitle").textContent = `${data.section_name || data.section_id || ""} • Started: ${new Date(data.started_at).toLocaleString()}`;
@@ -1913,8 +2106,26 @@ window.closeSessionDetailsModal = function () {
   document.getElementById("modal-session-details").classList.add("hidden");
 };
 
+async function downloadTeacherCsv(url, filename) {
+  if (role !== "teacher") return;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error("CSV download failed");
+    const objectUrl = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
 window.downloadSessionCSV = function (sessionId) {
-  window.open(`/api/exports/session-report.csv?session_id=${sessionId}`, "_blank");
+  return downloadTeacherCsv(`/api/exports/session-report.csv?session_id=${sessionId}`, `session-report-${sessionId}.csv`);
 };
 
 async function renderClassReports() {
@@ -1922,7 +2133,8 @@ async function renderClassReports() {
 }
 
 window.fetchClassGrades = async function () {
-  if (!reportsTbody) return;
+  if (!reportsTbody || role !== "teacher") return;
+  const generation = authGeneration;
   reportsTbody.innerHTML = "";
 
   const secId = currentReportsSectionId || currentSectionId;
@@ -1941,6 +2153,7 @@ window.fetchClassGrades = async function () {
     const res = await fetch(`/api/analytics/grades?section_id=${secId}&target=${targetVal}&weight=${weightVal}`);
     if (!res.ok) throw new Error("Failed to load grades");
     const grades = await res.json();
+    if (generation !== authGeneration || role !== "teacher") return;
 
     const countEl = document.getElementById("reports-student-count");
     if (countEl) countEl.textContent = `${grades.length} Students Enrolled`;
@@ -1986,7 +2199,7 @@ window.fetchClassGrades = async function () {
 
 window.downloadClassReportCSV = function () {
   const secId = currentReportsSectionId || currentSectionId;
-  window.open(`/api/exports/class-report.csv?section_id=${secId}`, "_blank");
+  return downloadTeacherCsv(`/api/exports/class-report.csv?section_id=${secId}`, `class-report-${secId}.csv`);
 };
 
 window.downloadGradesCSV = function () {
@@ -1995,7 +2208,7 @@ window.downloadGradesCSV = function () {
   const weightInput = document.getElementById("grading-weight");
   const targetVal = targetInput ? Math.max(1, parseInt(targetInput.value, 10) || 5) : 5;
   const weightVal = weightInput ? Math.max(1, parseFloat(weightInput.value) || 100) : 100;
-  window.open(`/api/exports/grades.csv?section_id=${secId}&target=${targetVal}&weight=${weightVal}`, "_blank");
+  return downloadTeacherCsv(`/api/exports/grades.csv?section_id=${secId}&target=${targetVal}&weight=${weightVal}`, `grades-${secId}.csv`);
 };
 
 // ============================================================================
@@ -2030,7 +2243,9 @@ function updateSessionUI() {
       badge.className = "px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600";
       badge.textContent = "No Active Session (Standby)";
     }
-    if (desc) desc.textContent = 'Click "Start Class Session" to begin tracking student participation and hand raises.';
+    if (desc) desc.textContent = role === "teacher"
+      ? 'Click "Start Class Session" to begin tracking student participation and hand raises.'
+      : "Waiting for the teacher to start the class session.";
     if (bannerStart) bannerStart.classList.remove("hidden");
     if (bannerStop) bannerStop.classList.add("hidden");
     if (titleHeader) titleHeader.textContent = "Live Class Session";
@@ -2150,18 +2365,18 @@ function handleSocketMessage(msg) {
       if (msg.payload.seats) {
         currentSeats = msg.payload.seats;
         renderClassroomDesks();
-        renderSectionRoster();
-        populateCalibrationInputs();
+        renderGuestDashboard();
       }
+      fetchSeats();
       fetchRecitationLedger();
-      fetchSessionsHistory();
+      if (role === "teacher") fetchSessionsHistory();
       break;
 
     case "GESTURE_EVENT":
     case "POINT_AWARDED":
     case "EVENT_DISMISSED":
       // Ultra-low latency: if ledger attached in WebSocket message, update in-memory instantly (<1ms)!
-      if (msg.ledger && Array.isArray(msg.ledger)) {
+      if (role === "guest" && msg.ledger && Array.isArray(msg.ledger)) {
         currentLedger = msg.ledger;
         renderRecitationLedger();
       } else {
@@ -2172,25 +2387,25 @@ function handleSocketMessage(msg) {
     case "SESSION_STARTED":
       activeSession = msg.payload;
       updateSessionUI();
-      if (msg.ledger) {
+      if (role === "guest" && msg.ledger) {
         currentLedger = msg.ledger;
         renderRecitationLedger();
       } else {
         fetchRecitationLedger();
       }
-      fetchSessionsHistory();
+      if (role === "teacher") fetchSessionsHistory();
       break;
 
     case "SESSION_STOPPED":
       activeSession = null;
       updateSessionUI();
-      if (msg.ledger) {
+      if (role === "guest" && msg.ledger) {
         currentLedger = msg.ledger;
         renderRecitationLedger();
       } else {
         fetchRecitationLedger();
       }
-      fetchSessionsHistory();
+      if (role === "teacher") fetchSessionsHistory();
       break;
 
     case "SEATS_UPDATED":
@@ -2355,14 +2570,16 @@ async function pushCameraSettings(partial, notify = false) {
 }
 
 // Initial Boot
-startClock();
-showView("class");
-fetchSections();
-fetchSeats();
-fetchRecitationLedger();
-fetchSessionsHistory();
-initEventsWebSocket();
-// Periodically refresh edge node status
-setInterval(() => { if (typeof fetchEdgeStatus === 'function') fetchEdgeStatus(); }, 15000);
-if (typeof fetchEdgeStatus === 'function') fetchEdgeStatus();
+async function bootApp() {
+  await restoreAuth();
+  startClock();
+  showView("class");
+  await fetchSections();
+  await Promise.all([fetchSeats(), fetchRecitationLedger()]);
+  if (role === "teacher") fetchSessionsHistory();
+  initEventsWebSocket();
+  fetchEdgeStatus();
+  setInterval(fetchEdgeStatus, 15000);
+}
+bootApp();
 
