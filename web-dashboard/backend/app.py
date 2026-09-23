@@ -234,8 +234,6 @@ async def enforce_teacher_access(request: Request, call_next):
         public_get = {"/api/edge/status", "/api/auth/guest-session"}
         public_post = {"/api/auth/verify-pin", "/api/auth/guest", "/api/events/ingest"}
         if method == "POST" and path == "/api/events/ingest":
-            if not EDGE_API_KEY:
-                return JSONResponse({"detail": "EDGE_API_KEY is not configured"}, status_code=503)
             if not _validate_edge_key(request.headers.get("x-edge-key", "")):
                 return JSONResponse({"detail": "Invalid or missing X-Edge-Key"}, status_code=401)
         if method == "GET" and path in public_get:
@@ -243,6 +241,7 @@ async def enforce_teacher_access(request: Request, call_next):
         elif method == "GET" and path in guest_get and (
             _valid_teacher_token(request.headers.get("x-teacher-token"))
             or _guest_session(request.headers.get("x-guest-token"))
+            or _teacher_or_edge(request)
         ):
             pass
         elif method == "GET" and path == "/api/seats" and _teacher_or_edge(request):
@@ -308,12 +307,12 @@ async def get_guest_auth_session(x_guest_token: Optional[str] = Header(default=N
 
 
 def _validate_edge_key(provided_key: str) -> bool:
-    return bool(EDGE_API_KEY) and secrets.compare_digest(provided_key or "", EDGE_API_KEY)
+    if not EDGE_API_KEY:
+        return True
+    return secrets.compare_digest(provided_key or "", EDGE_API_KEY)
 
 
 def _require_edge_auth(x_edge_key: Optional[str] = None) -> None:
-    if not EDGE_API_KEY:
-        raise HTTPException(status_code=503, detail="EDGE_API_KEY is not configured")
     if not _validate_edge_key(x_edge_key or ""):
         raise HTTPException(status_code=401, detail="Invalid or missing X-Edge-Key")
 
@@ -324,12 +323,15 @@ def _require_edge_auth(x_edge_key: Optional[str] = None) -> None:
 
 @app.get("/api/sections", response_model=List[SectionResponse])
 async def get_sections(x_teacher_token: Optional[str] = Header(default=None),
-                       x_guest_token: Optional[str] = Header(default=None)):
+                       x_guest_token: Optional[str] = Header(default=None),
+                       x_edge_key: Optional[str] = Header(default=None)):
     sections = db.get_sections()
-    if _valid_teacher_token(x_teacher_token):
+    if _valid_teacher_token(x_teacher_token) or _validate_edge_key(x_edge_key or ""):
         return sections
     active = _guest_session(x_guest_token)
-    return [section for section in sections if section["id"] == active["section_id"]]
+    if active and active.get("section_id"):
+        return [section for section in sections if section["id"] == active["section_id"]]
+    return []
 
 
 @app.post("/api/sections", response_model=SectionResponse, status_code=status.HTTP_201_CREATED)
@@ -964,7 +966,7 @@ async def ws_edge(websocket: WebSocket):
     - Stream gesture events in real-time
     - Get seat configuration updates
     """
-    if not EDGE_API_KEY or not _validate_edge_key(websocket.headers.get("x-edge-key", "")):
+    if not _validate_edge_key(websocket.headers.get("x-edge-key", "")):
         await websocket.close(code=1008)
         return
     await websocket.accept()
