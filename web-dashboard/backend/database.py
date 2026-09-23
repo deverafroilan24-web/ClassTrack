@@ -96,13 +96,22 @@ class PgCursorWrapper:
     def rowcount(self):
         return self.cursor.rowcount
 
+    def _serialize_row(self, r):
+        if r is None:
+            return None
+        d = dict(r)
+        for k, v in d.items():
+            if isinstance(v, datetime):
+                d[k] = v.isoformat()
+        return d
+
     def fetchone(self):
         r = self.cursor.fetchone()
-        return dict(r) if r is not None else None
+        return self._serialize_row(r)
 
     def fetchall(self):
         rows = self.cursor.fetchall()
-        return [dict(r) for r in rows] if rows else []
+        return [self._serialize_row(r) for r in rows] if rows else []
 
 
 class PgConnectionWrapper:

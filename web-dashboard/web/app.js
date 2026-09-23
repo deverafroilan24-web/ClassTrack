@@ -2035,7 +2035,10 @@ window.startClassSession = async function () {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: defaultTitle, section_id: currentSectionId }),
     });
-    if (!res.ok) throw new Error("Failed to start class session");
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      throw new Error(errJson.detail || "Failed to start class session");
+    }
     const data = await res.json();
     activeSession = data;
     updateSessionUI();
