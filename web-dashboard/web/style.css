@@ -980,28 +980,17 @@ input:focus-visible,
 body.guest-mode aside,
 body.guest-mode #btn-banner-start,
 body.guest-mode #btn-banner-stop,
-body.guest-mode #live-ledger-panel,
 body.guest-mode #section-switcher,
-body.guest-mode header > div:last-child > div:last-child {
+#guest-queue-view,
+body.guest-mode #guest-queue-view {
   display: none !important;
 }
 
 body.guest-mode main {
-  max-width: 1040px;
+  max-width: 1200px;
   width: 100%;
   margin: 0 auto;
   padding: clamp(16px, 3vw, 36px);
-}
-
-#guest-queue-view { display: none; }
-
-body.guest-mode #guest-queue-view {
-  display: block;
-  background: #fff;
-  border: 1px solid #dbe3ef;
-  border-radius: 20px;
-  overflow: hidden;
-  box-shadow: 0 12px 36px rgb(15 23 42 / 5%);
 }
 
 .guest-queue-heading {

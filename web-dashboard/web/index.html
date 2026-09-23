@@ -52,13 +52,6 @@
         <button id="btn-lock-teacher" type="button" onclick="lockTeacherMode()" class="hidden text-xs font-semibold text-slate-600 hover:text-slate-900">Lock / Logout</button>
       </div>
       <div class="hidden sm:block text-xs font-medium text-slate-500 tabular-nums" id="header-clock">--:--:--</div>
-
-      <div class="flex items-center space-x-2.5 pl-3 border-l border-slate-200">
-        <div class="w-8 h-8 rounded-full bg-slate-200 text-slate-700 flex items-center justify-center font-bold text-xs">
-          Prof
-        </div>
-        <span class="hidden sm:inline text-sm font-semibold text-slate-800">Instructor</span>
-      </div>
     </div>
   </header>
 
@@ -150,18 +143,6 @@
             </button>
           </div>
         </div>
-
-        <section id="guest-queue-view" aria-label="Live participation queue">
-          <div class="guest-queue-heading">
-            <div>
-              <p class="guest-eyebrow">LIVE CLASSROOM</p>
-              <h2>Participation Queue</h2>
-              <p>Students currently raising their hands, in order.</p>
-            </div>
-            <span class="guest-live-indicator"><span></span> Live</span>
-          </div>
-          <div id="guest-queue-list" class="guest-queue-list" aria-live="polite"></div>
-        </section>
 
         <!-- Full-Width Live Recitation Participation Ledger (Video feed removed — runs on Camera Node) -->
         <div id="live-ledger-panel" class="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs flex flex-col">

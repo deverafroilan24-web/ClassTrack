@@ -954,10 +954,6 @@ async function fetchRecitationLedger() {
 
 function renderRecitationLedger() {
   renderGuestQueue();
-  if (role === "guest") {
-    if (recitationTbody) recitationTbody.innerHTML = "";
-    return;
-  }
   if (!recitationTbody) return;
   recitationTbody.innerHTML = "";
 
@@ -992,7 +988,11 @@ function renderRecitationLedger() {
     }
 
     let actionBtn = "";
-    if (!activeSession) {
+    if (role === "guest") {
+      actionBtn = (student.latest_earned_point === 1)
+        ? `<span class="text-emerald-700 font-bold text-[11px] bg-emerald-50 px-1.5 py-0.5 rounded">✓ +1</span>`
+        : `<span class="text-[11px] text-slate-400 italic">Idle</span>`;
+    } else if (!activeSession) {
       actionBtn = `<span class="text-[11px] text-slate-400 italic">Idle</span>`;
     } else if (student.latest_earned_point === 1) {
       actionBtn = `<span class="text-emerald-700 font-bold text-[11px] bg-emerald-50 px-1.5 py-0.5 rounded">✓ +1</span>`;
