@@ -102,6 +102,12 @@ def verify_pin_hash(pin: str, stored: str) -> bool:
         return False
 
 
+def hash_pin(pin: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", pin.encode(), salt, 200_000)
+    return f"pbkdf2_sha256$200000${salt.hex()}${digest.hex()}"
+
+
 class PgCursorWrapper:
     def __init__(self, cursor):
         self.cursor = cursor
@@ -222,12 +228,45 @@ class DatabaseManager:
             conn.execute(
                 f"CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at {timestamp_type} NOT NULL)"
             )
+            conn.execute("""CREATE TABLE IF NOT EXISTS teachers (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, pin TEXT UNIQUE,
+                department TEXT NOT NULL DEFAULT '', pin_hash TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                auth_version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+            )""")
+            if self.is_postgres:
+                conn.execute("ALTER TABLE teachers ADD COLUMN IF NOT EXISTS pin TEXT")
+                conn.execute("ALTER TABLE teachers ALTER COLUMN pin_hash DROP NOT NULL")
+                conn.execute("ALTER TABLE teachers ALTER COLUMN is_active SET DEFAULT 1")
+                conn.execute("ALTER TABLE teachers ALTER COLUMN auth_version SET DEFAULT 1")
+                conn.execute("ALTER TABLE teachers ALTER COLUMN created_at SET DEFAULT NOW()")
+                conn.execute("ALTER TABLE teachers ALTER COLUMN id SET DEFAULT ('teacher_' || replace(gen_random_uuid()::text, '-', ''))")
+                conn.execute("ALTER TABLE teachers ADD COLUMN IF NOT EXISTS auth_version INTEGER NOT NULL DEFAULT 1")
+            else:
+                if "pin" not in {row[1] for row in conn.execute("PRAGMA table_info(teachers)")}:
+                    conn.execute("ALTER TABLE teachers ADD COLUMN pin TEXT")
+                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_teachers_pin_unique ON teachers(pin) WHERE pin IS NOT NULL")
+            # Preserve the existing sample accounts and section ownership during the
+            # migration. New teacher accounts are managed only through the database.
+            legacy = [
+                ("teacher_1234", "Teacher Froilan", "Information Technology", "1234"),
+                ("teacher_4321", "Teacher Leonard", "Computer Science", "4321"),
+                ("teacher_1111", "Teacher Santos", "Engineering", "1111"),
+                ("teacher_2222", "Teacher Garcia", "General Education", "2222"),
+            ]
+            # Migrate each legacy account independently. ON CONFLICT preserves
+            # existing names, PIN changes, and deactivation state on later startups.
+            for teacher_id, name, department, teacher_pin in legacy:
+                conn.execute("UPDATE teachers SET pin = ? WHERE id = ? AND pin IS NULL",
+                             (teacher_pin, teacher_id))
+                conn.execute(
+                    "INSERT INTO teachers (id, name, department, pin, pin_hash, is_active, auth_version, created_at) VALUES (?, ?, ?, ?, ?, 1, 1, ?) ON CONFLICT (id) DO NOTHING",
+                    (teacher_id, name, department, teacher_pin, hash_pin(teacher_pin), _now_iso()),
+                )
             existing = conn.execute("SELECT value FROM app_settings WHERE key = ?", ("teacher_pin_hash",)).fetchone()
             if existing and (not os.getenv("TEACHER_PIN") or verify_pin_hash(pin, existing["value"])):
                 return
-            salt = secrets.token_bytes(16)
-            digest = hashlib.pbkdf2_hmac("sha256", pin.encode(), salt, 200_000)
-            pin_hash = f"pbkdf2_sha256$200000${salt.hex()}${digest.hex()}"
+            pin_hash = hash_pin(pin)
             if existing:
                 conn.execute("UPDATE app_settings SET value = ?, updated_at = ? WHERE key = ?",
                              (pin_hash, _now_iso(), "teacher_pin_hash"))
@@ -239,6 +278,47 @@ class DatabaseManager:
         with self._connect() as conn:
             row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
             return row["value"] if row else None
+
+    def list_teachers(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, name, department, is_active, created_at FROM teachers ORDER BY name").fetchall()
+            return [dict(row) for row in rows]
+
+    def get_teacher_by_pin(self, pin: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, name, department, pin, pin_hash, auth_version FROM teachers WHERE is_active = 1").fetchall()
+        for row in rows:
+            if (row.get("pin") if isinstance(row, dict) else row["pin"]) == pin or verify_pin_hash(pin, row["pin_hash"]):
+                return {"id": row["id"], "name": row["name"], "department": row["department"],
+                        "auth_version": row["auth_version"]}
+        return None
+
+    def get_teacher(self, teacher_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT id, name, department, is_active, auth_version FROM teachers WHERE id = ?",
+                               (teacher_id,)).fetchone()
+            return dict(row) if row else None
+
+    def create_teacher(self, name: str, department: str, pin: str) -> Dict[str, Any]:
+        # Ensure a PIN cannot identify two accounts.
+        with self._connect() as conn:
+            existing = conn.execute("SELECT pin, pin_hash FROM teachers").fetchall()
+            if any((row.get("pin") if isinstance(row, dict) else row["pin"]) == pin or verify_pin_hash(pin, row["pin_hash"])
+                   for row in existing):
+                raise ValueError("That teacher code is already assigned")
+            teacher = {"id": f"teacher_{uuid.uuid4().hex[:12]}", "name": name.strip(),
+                       "department": department.strip(), "is_active": 1, "created_at": _now_iso()}
+            conn.execute(
+                "INSERT INTO teachers (id, name, department, pin, pin_hash, is_active, auth_version, created_at) VALUES (?, ?, ?, ?, ?, 1, 1, ?)",
+                (teacher["id"], teacher["name"], teacher["department"], pin, hash_pin(pin), teacher["created_at"]),
+            )
+        return teacher
+
+    def set_teacher_active(self, teacher_id: str, active: bool) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute("UPDATE teachers SET is_active = ?, auth_version = auth_version + 1 WHERE id = ?",
+                                  (1 if active else 0, teacher_id))
+            return cursor.rowcount > 0
 
     @contextmanager
     def _connect(self, foreign_keys: bool = True):
@@ -723,7 +803,7 @@ class DatabaseManager:
     # -------------------------------------------------------------
     # SEATS
     # -------------------------------------------------------------
-    def get_seats(self, section_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_seats(self, section_id: Optional[str] = None, teacher_id: Optional[str] = None) -> List[Dict[str, Any]]:
         with self._connect() as conn:
             query = """
                 SELECT 
@@ -748,9 +828,15 @@ class DatabaseManager:
                 LEFT JOIN events e ON s.id = e.seat_id
             """
             params: List[Any] = []
+            conditions = []
             if section_id:
-                query += " WHERE s.section_id = ?"
+                conditions.append("s.section_id = ?")
                 params.append(section_id)
+            if teacher_id:
+                conditions.append("COALESCE((SELECT sec.teacher_id FROM sections sec WHERE sec.id = s.section_id), 'teacher_master') = ?")
+                params.append(teacher_id)
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
             query += " GROUP BY s.id, s.section_id, s.label, s.student_name, s.student_id_number, s.student_id, s.grid_row, s.grid_col, s.x_min, s.y_min, s.x_max, s.y_max, s.is_present, st.id, st.name, st.student_id_number, st.photo_path, st.face_embedding ORDER BY s.grid_row ASC, s.grid_col ASC, s.label ASC"
 
             cursor = conn.execute(query, params)

@@ -43,6 +43,8 @@ let currentLedger = [];
 let currentPodiumList = [];
 let teacherToken = sessionStorage.getItem("classtrack.teacherToken") || "";
 let teacherName = sessionStorage.getItem("classtrack.teacherName") || "";
+let teacherId = sessionStorage.getItem("classtrack.teacherId") || "";
+let isAdmin = false;
 let guestToken = sessionStorage.getItem("classtrack.guestToken") || "";
 let guestAccessCode = "";
 let guestAccessSessionId = "";
@@ -81,6 +83,7 @@ function applyRole(nextRole) {
   document.getElementById("role-badge").textContent = role === "teacher" ? (teacherName ? `Teacher: ${teacherName}` : "Teacher Mode") : "Guest View-Only Mode";
   document.getElementById("btn-switch-teacher").classList.toggle("hidden", role === "teacher");
   document.getElementById("btn-lock-teacher").classList.toggle("hidden", role !== "teacher");
+  document.getElementById("nav-teachers")?.classList.toggle("hidden", role !== "teacher" || !isAdmin);
   if (role === "guest") showView("class");
   updateSessionUI();
   renderRecitationLedger();
@@ -120,10 +123,14 @@ window.showGuestLogin = function () {
 window.enterGuestMode = function () {
   authGeneration += 1;
   teacherToken = "";
+  teacherId = "";
+  isAdmin = false;
   guestToken = "";
   guestAccessCode = "";
   guestAccessSessionId = "";
   sessionStorage.removeItem("classtrack.teacherToken");
+  sessionStorage.removeItem("classtrack.teacherId");
+  sessionStorage.removeItem("classtrack.teacherName");
   sessionStorage.removeItem("classtrack.guestToken");
   if (socketReconnectTimer) clearTimeout(socketReconnectTimer);
   if (eventsSocket) { eventsSocket.onclose = null; eventsSocket.close(); eventsSocket = null; }
@@ -165,10 +172,13 @@ window.submitTeacherLogin = async function (event) {
     if (!response.ok) throw new Error(data.detail || "Teacher login failed");
     teacherToken = data.token;
     teacherName = data.teacher_name || "";
+    teacherId = data.teacher_id || "";
+    isAdmin = !!data.is_admin;
     guestToken = "";
     authGeneration += 1;
     sessionStorage.setItem("classtrack.teacherToken", teacherToken);
     sessionStorage.setItem("classtrack.teacherName", teacherName);
+    sessionStorage.setItem("classtrack.teacherId", teacherId);
     sessionStorage.removeItem("classtrack.guestToken");
     pinInput.value = "";
     document.getElementById("welcome-portal").classList.add("hidden");
@@ -232,7 +242,10 @@ async function restoreAuth() {
       if (response.ok) {
         const sessionData = await response.json();
         teacherName = sessionData.teacher_name || teacherName;
+        teacherId = sessionData.teacher_id || teacherId;
+        isAdmin = !!sessionData.is_admin;
         sessionStorage.setItem("classtrack.teacherName", teacherName);
+        sessionStorage.setItem("classtrack.teacherId", teacherId);
         document.getElementById("welcome-portal").classList.add("hidden");
         applyRole("teacher");
         return true;
@@ -241,7 +254,11 @@ async function restoreAuth() {
       console.warn("Teacher session validation failed", error);
     }
     teacherToken = "";
+    teacherId = "";
+    isAdmin = false;
     sessionStorage.removeItem("classtrack.teacherToken");
+    sessionStorage.removeItem("classtrack.teacherId");
+    sessionStorage.removeItem("classtrack.teacherName");
   }
   if (guestToken) {
     try {
@@ -437,6 +454,65 @@ window.showView = function (viewName) {
     renderClassReports();
   } else if (viewName === "camera") {
     fetchCameraSettings();
+  } else if (viewName === "teachers" && isAdmin) {
+    fetchTeachers();
+  }
+};
+
+async function fetchTeachers() {
+  const response = await fetch("/api/admin/teachers");
+  if (!response.ok) throw new Error("Could not load teacher accounts");
+  const teachers = await response.json();
+  const tbody = document.getElementById("teachers-table-body");
+  tbody.innerHTML = teachers.map((teacher) => `<tr>
+    <td class="px-4 py-3 font-semibold text-slate-800">${escapeHtml(teacher.name)}</td>
+    <td class="px-4 py-3 text-slate-600">${escapeHtml(teacher.department || "—")}</td>
+    <td class="px-4 py-3"><span class="px-2 py-1 rounded-full text-xs ${teacher.is_active ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}">${teacher.is_active ? "Active" : "Inactive"}</span></td>
+    <td class="px-4 py-3 text-right">${teacher.is_active ? `<button onclick="deactivateTeacher('${escapeHtml(teacher.id)}')" class="text-rose-700 hover:underline font-semibold">Deactivate</button>` : ""}</td>
+  </tr>`).join("") || '<tr><td colspan="4" class="px-4 py-6 text-center text-slate-500">No teacher accounts yet.</td></tr>';
+}
+
+function showTeacherAdminMessage(message, isError = false) {
+  const element = document.getElementById("teacher-admin-message");
+  element.textContent = message;
+  element.className = `text-sm rounded-lg px-3 py-2 ${isError ? "bg-rose-50 text-rose-700" : "bg-emerald-50 text-emerald-700"}`;
+}
+
+window.createTeacher = async function (event) {
+  event.preventDefault();
+  const button = document.getElementById("teacher-create-submit");
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/admin/teachers", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: document.getElementById("new-teacher-name").value.trim(),
+        department: document.getElementById("new-teacher-department").value.trim(),
+        pin: document.getElementById("new-teacher-pin").value.trim(),
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Could not add teacher");
+    document.getElementById("teacher-create-form").reset();
+    showTeacherAdminMessage("Teacher account added.");
+    await fetchTeachers();
+  } catch (error) {
+    showTeacherAdminMessage(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+};
+
+window.deactivateTeacher = async function (teacherIdToDeactivate) {
+  if (!window.confirm("Deactivate this teacher account? Their sections and session history will remain in the database.")) return;
+  try {
+    const response = await fetch(`/api/admin/teachers/${encodeURIComponent(teacherIdToDeactivate)}`, { method: "DELETE" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Could not deactivate teacher");
+    showTeacherAdminMessage("Teacher account deactivated. Their current sign-in is now invalid.");
+    await fetchTeachers();
+  } catch (error) {
+    showTeacherAdminMessage(error.message, true);
   }
 };
 
@@ -1813,7 +1889,7 @@ window.onDeskDrop = async function (e, targetSeatId) {
   if (draggedFromSeatId) {
     if (draggedFromSeatId !== targetSeatId) {
       try {
-        const res = await fetch("/api/seats/swap", {
+        const res = await fetch(`/api/seats/swap?section_id=${encodeURIComponent(currentSectionId)}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ seat_id_1: draggedFromSeatId, seat_id_2: targetSeatId }),
@@ -1885,7 +1961,7 @@ window.unassignSeat = async function (seatId) {
 
 window.toggleAttendance = async function (seatId) {
   try {
-    const res = await fetch(`/api/seats/${seatId}/toggle-attendance`, { method: "POST" });
+    const res = await fetch(`/api/seats/${seatId}/toggle-attendance?section_id=${encodeURIComponent(currentSectionId)}`, { method: "POST" });
     if (!res.ok) throw new Error("Toggle attendance failed");
     fetchSeats();
     fetchRecitationLedger();

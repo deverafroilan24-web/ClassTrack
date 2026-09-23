@@ -196,19 +196,18 @@ app.mount("/uploads", StaticFiles(directory=str(uploads_dir.parent)), name="uplo
 # ---------------------------------------------------------------------------
 # Authentication and response filtering
 # ---------------------------------------------------------------------------
-SAMPLE_TEACHERS = {
-    "1234": {"id": "teacher_1234", "name": "Teacher Froilan", "department": "Information Technology"},
-    "4321": {"id": "teacher_4321", "name": "Teacher Leonard", "department": "Computer Science"},
-    "1111": {"id": "teacher_1111", "name": "Teacher Santos", "department": "Engineering"},
-    "2222": {"id": "teacher_2222", "name": "Teacher Garcia", "department": "General Education"},
-}
-
 class PinRequest(BaseModel):
     pin: str = Field(min_length=1, max_length=128)
 
 
 class GuestCodeRequest(BaseModel):
     code: str = Field(min_length=1, max_length=32)
+
+
+class TeacherCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    department: str = Field(default="", max_length=120)
+    pin: str = Field(min_length=4, max_length=32)
 
 
 def _teacher_pin_matches(pin: str) -> bool:
@@ -221,6 +220,8 @@ def _create_teacher_token(teacher_info: Optional[dict] = None) -> str:
         "role": "teacher",
         "teacher_id": teacher_info["id"],
         "teacher_name": teacher_info["name"],
+        "is_admin": teacher_info["id"] == "teacher_master",
+        "auth_version": teacher_info.get("auth_version", 1),
         "pin_version": PIN_VERSION,
         "exp": int(time.time()) + TOKEN_LIFETIME_SECONDS,
         "nonce": secrets.token_hex(12)
@@ -247,7 +248,22 @@ def _decode_token(token: Optional[str]) -> Optional[dict]:
 
 def _valid_teacher_token(token: Optional[str]) -> bool:
     payload = _decode_token(token)
-    return bool(payload and payload.get("role") == "teacher")
+    if not payload or payload.get("role") != "teacher":
+        return False
+    teacher_id = payload.get("teacher_id", "teacher_master")
+    if teacher_id == "teacher_master":
+        return True
+    teacher = db.get_teacher(teacher_id)
+    return bool(teacher and teacher["is_active"] and teacher["auth_version"] == payload.get("auth_version", 1))
+
+
+def _require_admin(token: Optional[str]) -> dict:
+    if not _valid_teacher_token(token):
+        raise HTTPException(status_code=401, detail="Teacher authentication required")
+    payload = _decode_token(token) or {}
+    if payload.get("teacher_id") != "teacher_master":
+        raise HTTPException(status_code=403, detail="Instructor account required")
+    return payload
 
 
 def _create_guest_token(session: dict) -> str:
@@ -300,6 +316,11 @@ async def enforce_teacher_access(request: Request, call_next):
                 return JSONResponse({"detail": "Invalid or missing X-Edge-Key"}, status_code=401)
         if method == "GET" and path in public_get:
             pass
+        elif path.startswith("/api/admin/teachers"):
+            try:
+                _require_admin(request.headers.get("x-teacher-token"))
+            except HTTPException as error:
+                return JSONResponse({"detail": error.detail}, status_code=error.status_code)
         elif method == "GET" and path in guest_get and (
             _valid_teacher_token(request.headers.get("x-teacher-token"))
             or _guest_session(request.headers.get("x-guest-token"))
@@ -333,9 +354,8 @@ async def verify_teacher_pin(body: PinRequest, request: Request):
     
     teacher_info = None
     pin_clean = body.pin.strip()
-    if pin_clean in SAMPLE_TEACHERS:
-        teacher_info = SAMPLE_TEACHERS[pin_clean]
-    elif _teacher_pin_matches(pin_clean):
+    teacher_info = db.get_teacher_by_pin(pin_clean)
+    if not teacher_info and _teacher_pin_matches(pin_clean):
         teacher_info = {"id": "teacher_master", "name": "Instructor"}
 
     if not teacher_info:
@@ -347,7 +367,8 @@ async def verify_teacher_pin(body: PinRequest, request: Request):
         "authenticated": True,
         "token": _create_teacher_token(teacher_info),
         "teacher_id": teacher_info["id"],
-        "teacher_name": teacher_info["name"]
+        "teacher_name": teacher_info["name"],
+        "is_admin": teacher_info["id"] == "teacher_master",
     }
 
 
@@ -360,8 +381,53 @@ async def get_auth_session(x_teacher_token: Optional[str] = Header(default=None)
         "authenticated": True,
         "role": "teacher",
         "teacher_id": payload.get("teacher_id", "teacher_master"),
-        "teacher_name": payload.get("teacher_name", "Instructor")
+        "teacher_name": payload.get("teacher_name", "Instructor"),
+        "is_admin": payload.get("is_admin", False)
     }
+
+
+@app.middleware("http")
+async def restrict_teacher_sections(request: Request, call_next):
+    """Prevent teachers from selecting another teacher's section by changing an ID."""
+    token = request.headers.get("x-teacher-token")
+    if _valid_teacher_token(token):
+        payload = _decode_token(token) or {}
+        teacher_id = payload.get("teacher_id", "teacher_master")
+        if teacher_id != "teacher_master":
+            parts = request.url.path.strip("/").split("/")
+            section_id = None
+            if len(parts) >= 3 and parts[0] == "api" and parts[1] == "sections":
+                section_id = parts[2]
+            if section_id and db.get_section_owner(section_id) != teacher_id:
+                return JSONResponse({"detail": "Section not found"}, status_code=404)
+            if request.url.path == "/api/seats" and request.method == "GET":
+                requested_section = request.query_params.get("section_id")
+                if requested_section and db.get_section_owner(requested_section) != teacher_id:
+                    return JSONResponse({"detail": "Section not found"}, status_code=404)
+    return await call_next(request)
+
+
+@app.get("/api/admin/teachers")
+async def list_teachers(x_teacher_token: Optional[str] = Header(default=None)):
+    _require_admin(x_teacher_token)
+    return db.list_teachers()
+
+
+@app.post("/api/admin/teachers", status_code=status.HTTP_201_CREATED)
+async def add_teacher(body: TeacherCreateRequest, x_teacher_token: Optional[str] = Header(default=None)):
+    _require_admin(x_teacher_token)
+    try:
+        return db.create_teacher(body.name, body.department, body.pin.strip())
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.delete("/api/admin/teachers/{teacher_id}")
+async def deactivate_teacher(teacher_id: str, x_teacher_token: Optional[str] = Header(default=None)):
+    _require_admin(x_teacher_token)
+    if teacher_id == "teacher_master" or not db.set_teacher_active(teacher_id, False):
+        raise HTTPException(status_code=404, detail="Teacher account not found")
+    return {"deactivated": True, "teacher_id": teacher_id}
 
 
 @app.post("/api/auth/guest")
@@ -407,11 +473,12 @@ def _require_edge_auth(x_edge_key: Optional[str] = None) -> None:
 async def get_sections(x_teacher_token: Optional[str] = Header(default=None),
                        x_guest_token: Optional[str] = Header(default=None),
                        x_edge_key: Optional[str] = Header(default=None)):
-    teacher_payload = _decode_token(x_teacher_token)
+    teacher_payload = _decode_token(x_teacher_token) if _valid_teacher_token(x_teacher_token) else None
     if teacher_payload and teacher_payload.get("role") == "teacher":
         return db.get_sections(teacher_id=teacher_payload.get("teacher_id"))
-    if _validate_edge_key(x_edge_key or ""):
-        return db.get_sections()
+    if x_edge_key and _validate_edge_key(x_edge_key):
+        active = db.get_active_session()
+        return [section for section in db.get_sections() if active and section["id"] == active.get("section_id")]
     active = _guest_session(x_guest_token)
     if active and active.get("section_id"):
         return [section for section in db.get_sections() if section["id"] == active["section_id"]]
@@ -420,7 +487,7 @@ async def get_sections(x_teacher_token: Optional[str] = Header(default=None),
 
 @app.post("/api/sections", response_model=SectionResponse, status_code=status.HTTP_201_CREATED)
 async def create_section(body: SectionCreateRequest, x_teacher_token: Optional[str] = Header(default=None)):
-    teacher_payload = _decode_token(x_teacher_token)
+    teacher_payload = _decode_token(x_teacher_token) if _valid_teacher_token(x_teacher_token) else None
     teacher_id = teacher_payload.get("teacher_id") if teacher_payload and teacher_payload.get("role") == "teacher" else None
     sec = db.create_section(name=body.name, subject=body.subject, room=body.room, teacher_id=teacher_id)
     await ConnectionManager.broadcast_event({"type": "SECTIONS_UPDATED", "payload": db.get_sections()})
@@ -428,19 +495,34 @@ async def create_section(body: SectionCreateRequest, x_teacher_token: Optional[s
 
 
 @app.delete("/api/sections/{section_id}")
-async def delete_section(section_id: str):
+async def delete_section(section_id: str, x_teacher_token: Optional[str] = Header(default=None)):
+    teacher_id = _teacher_id_from_token(x_teacher_token)
+    if db.get_section_owner(section_id) != teacher_id:
+        raise HTTPException(status_code=404, detail="Section not found")
     db.delete_section(section_id)
     await ConnectionManager.broadcast_event({"type": "SECTIONS_UPDATED", "payload": db.get_sections()})
     return {"message": "Section deleted successfully"}
 
 
+def _teacher_owned_section_ids(teacher_id: Optional[str]) -> set:
+    return {section["id"] for section in db.get_sections(teacher_id=teacher_id)} if teacher_id else set()
+
+
+def _enforce_owned_section(section_id: str, token: Optional[str]) -> None:
+    teacher_id = _teacher_id_from_token(token)
+    if not teacher_id or db.get_section_owner(section_id) != teacher_id:
+        raise HTTPException(status_code=404, detail="Section not found")
+
+
 @app.get("/api/sections/{section_id}/students")
-async def get_section_students(section_id: str):
+async def get_section_students(section_id: str, x_teacher_token: Optional[str] = Header(default=None)):
+    _enforce_owned_section(section_id, x_teacher_token)
     return db.get_students(section_id)
 
 
 @app.post("/api/sections/{section_id}/students/enroll")
-async def enroll_student(section_id: str, body: StudentEnrollRequest):
+async def enroll_student(section_id: str, body: StudentEnrollRequest, x_teacher_token: Optional[str] = Header(default=None)):
+    _enforce_owned_section(section_id, x_teacher_token)
     photo_rel_path = ""
     face_emb_str = ""
 
@@ -482,7 +564,13 @@ async def enroll_student(section_id: str, body: StudentEnrollRequest):
 
 
 @app.delete("/api/students/{student_id}")
-async def delete_student(student_id: str, section_id: Optional[str] = None):
+async def delete_student(student_id: str, section_id: Optional[str] = None,
+                         x_teacher_token: Optional[str] = Header(default=None)):
+    if not section_id:
+        raise HTTPException(status_code=400, detail="section_id is required")
+    _enforce_owned_section(section_id, x_teacher_token)
+    if not any(student["id"] == student_id for student in db.get_students(section_id)):
+        raise HTTPException(status_code=404, detail="Student not found")
     db.delete_student(student_id)
     seats = db.get_seats(section_id=section_id)
     students = db.get_students(section_id=section_id)
@@ -495,7 +583,8 @@ async def delete_student(student_id: str, section_id: Optional[str] = None):
 
 
 @app.post("/api/sections/{section_id}/seats/auto-generate-enrolled")
-async def auto_generate_desks_enrolled(section_id: str):
+async def auto_generate_desks_enrolled(section_id: str, x_teacher_token: Optional[str] = Header(default=None)):
+    _enforce_owned_section(section_id, x_teacher_token)
     updated_seats = db.auto_generate_desks_from_enrolled_students(section_id)
     students = db.get_students(section_id=section_id)
     await ConnectionManager.broadcast_event({
@@ -508,14 +597,16 @@ async def auto_generate_desks_enrolled(section_id: str):
 
 
 @app.post("/api/sections/{section_id}/seats/grid")
-async def configure_seating_grid(section_id: str, body: GridConfigureRequest):
+async def configure_seating_grid(section_id: str, body: GridConfigureRequest, x_teacher_token: Optional[str] = Header(default=None)):
+    _enforce_owned_section(section_id, x_teacher_token)
     updated_seats = db.configure_seating_grid(section_id, body.rows, body.cols)
     await ConnectionManager.broadcast_event({"type": "SEATS_UPDATED", "payload": updated_seats})
     return updated_seats
 
 
 @app.post("/api/sections/{section_id}/seats/auto-fill-alphabetical")
-async def auto_fill_seats_alphabetical(section_id: str):
+async def auto_fill_seats_alphabetical(section_id: str, x_teacher_token: Optional[str] = Header(default=None)):
+    _enforce_owned_section(section_id, x_teacher_token)
     updated_seats = db.auto_fill_seats_alphabetical(section_id)
     students = db.get_students(section_id=section_id)
     await ConnectionManager.broadcast_event({
@@ -527,7 +618,8 @@ async def auto_fill_seats_alphabetical(section_id: str):
 
 
 @app.post("/api/sections/{section_id}/seats/clear-assignments")
-async def clear_seat_assignments(section_id: str):
+async def clear_seat_assignments(section_id: str, x_teacher_token: Optional[str] = Header(default=None)):
+    _enforce_owned_section(section_id, x_teacher_token)
     updated_seats = db.clear_seat_assignments(section_id)
     students = db.get_students(section_id=section_id)
     await ConnectionManager.broadcast_event({
@@ -539,7 +631,13 @@ async def clear_seat_assignments(section_id: str):
 
 
 @app.post("/api/seats/{seat_id}/assign")
-async def assign_student_seat(seat_id: str, body: SeatAssignRequest, section_id: Optional[str] = None):
+async def assign_student_seat(seat_id: str, body: SeatAssignRequest, section_id: Optional[str] = None,
+                              x_teacher_token: Optional[str] = Header(default=None)):
+    if not section_id:
+        raise HTTPException(status_code=400, detail="section_id is required")
+    _enforce_owned_section(section_id, x_teacher_token)
+    if not any(seat["id"] == seat_id for seat in db.get_seats(section_id=section_id)):
+        raise HTTPException(status_code=404, detail="Seat not found")
     res = db.assign_student_to_seat(seat_id, body.student_id)
     actual_sec_id = section_id or res.get("section_id")
     seats = db.get_seats(section_id=actual_sec_id)
@@ -554,7 +652,14 @@ async def assign_student_seat(seat_id: str, body: SeatAssignRequest, section_id:
 
 
 @app.post("/api/seats/swap")
-async def swap_seats(body: SeatSwapRequest, section_id: Optional[str] = None):
+async def swap_seats(body: SeatSwapRequest, section_id: Optional[str] = None,
+                     x_teacher_token: Optional[str] = Header(default=None)):
+    if not section_id:
+        raise HTTPException(status_code=400, detail="section_id is required")
+    _enforce_owned_section(section_id, x_teacher_token)
+    seat_ids = {seat["id"] for seat in db.get_seats(section_id=section_id)}
+    if body.seat_id_1 not in seat_ids or body.seat_id_2 not in seat_ids:
+        raise HTTPException(status_code=404, detail="Seat not found")
     ok = db.swap_seats(body.seat_id_1, body.seat_id_2)
     if not ok:
         raise HTTPException(status_code=400, detail="Could not swap seats")
@@ -628,7 +733,11 @@ async def export_grades_csv(section_id: str, target: int = 5, weight: float = 10
 
 
 @app.post("/api/sections/{section_id}/students")
-async def register_student(section_id: str, body: StudentRegisterRequest):
+async def register_student(section_id: str, body: StudentRegisterRequest,
+                           x_teacher_token: Optional[str] = Header(default=None)):
+    _enforce_owned_section(section_id, x_teacher_token)
+    if body.seat_id and not any(seat["id"] == body.seat_id for seat in db.get_seats(section_id=section_id)):
+        raise HTTPException(status_code=404, detail="Seat not found")
     seat = db.register_student(
         section_id=section_id,
         student_name=body.student_name,
@@ -766,11 +875,22 @@ async def stop_session(x_teacher_token: Optional[str] = Header(default=None)):
 async def get_seats(section_id: Optional[str] = None,
                     x_teacher_token: Optional[str] = Header(default=None),
                     x_edge_key: Optional[str] = Header(default=None)):
-    return db.get_seats(section_id=section_id)
+    teacher_id = _teacher_id_from_token(x_teacher_token) if _valid_teacher_token(x_teacher_token) else None
+    if x_edge_key and _validate_edge_key(x_edge_key):
+        active = db.get_active_session()
+        section_id = active.get("section_id") if active else None
+        return db.get_seats(section_id=section_id) if section_id else []
+    if not teacher_id:
+        return []
+    return db.get_seats(section_id=section_id, teacher_id=teacher_id)
 
 
 @app.put("/api/seats", response_model=List[SeatSchema])
-async def update_seats(body: SeatBulkUpdateRequest, section_id: Optional[str] = None):
+async def update_seats(body: SeatBulkUpdateRequest, section_id: Optional[str] = None,
+                       x_teacher_token: Optional[str] = Header(default=None)):
+    if not section_id:
+        raise HTTPException(status_code=400, detail="section_id is required")
+    _enforce_owned_section(section_id, x_teacher_token)
     seats_data = [s.model_dump() for s in body.seats]
     updated = db.bulk_update_seats(seats_data, section_id=section_id)
     students = db.get_students(section_id=section_id)
@@ -784,14 +904,22 @@ async def update_seats(body: SeatBulkUpdateRequest, section_id: Optional[str] = 
 
 
 @app.post("/api/sections/{section_id}/attendance/bulk", response_model=List[SeatSchema])
-async def set_section_attendance(section_id: str, is_present: bool = True):
+async def set_section_attendance(section_id: str, is_present: bool = True, x_teacher_token: Optional[str] = Header(default=None)):
+    _enforce_owned_section(section_id, x_teacher_token)
     updated = db.set_section_attendance(section_id, is_present=is_present)
     await ConnectionManager.broadcast_event({"type": "SEATS_UPDATED", "payload": updated})
     return updated
 
 
 @app.post("/api/seats/{seat_id}/toggle-attendance", response_model=SeatAttendanceToggleResponse)
-async def toggle_seat_attendance(seat_id: str):
+async def toggle_seat_attendance(seat_id: str, section_id: Optional[str] = None,
+                                 x_teacher_token: Optional[str] = Header(default=None)):
+    if not section_id:
+        raise HTTPException(status_code=400, detail="section_id is required")
+    _enforce_owned_section(section_id, x_teacher_token)
+    matching_seat = next((seat for seat in db.get_seats(section_id=section_id) if seat["id"] == seat_id), None)
+    if not matching_seat:
+        raise HTTPException(status_code=404, detail="Seat not found")
     try:
         res = db.toggle_attendance(seat_id)
         await ConnectionManager.broadcast_event({"type": "ATTENDANCE_TOGGLED", "payload": res})
@@ -801,7 +929,11 @@ async def toggle_seat_attendance(seat_id: str):
 
 
 @app.post("/api/seats/preset/{preset_name}", response_model=List[SeatSchema])
-async def load_seat_preset(preset_name: str, section_id: Optional[str] = None):
+async def load_seat_preset(preset_name: str, section_id: Optional[str] = None,
+                           x_teacher_token: Optional[str] = Header(default=None)):
+    if not section_id:
+        raise HTTPException(status_code=400, detail="section_id is required")
+    _enforce_owned_section(section_id, x_teacher_token)
     try:
         updated = db.load_preset_seats(preset_name, section_id=section_id)
         await ConnectionManager.broadcast_event({"type": "SEATS_UPDATED", "payload": updated})
@@ -811,7 +943,11 @@ async def load_seat_preset(preset_name: str, section_id: Optional[str] = None):
 
 
 @app.delete("/api/seats/{seat_id}")
-async def delete_seat(seat_id: str, section_id: Optional[str] = None):
+async def delete_seat(seat_id: str, section_id: Optional[str] = None,
+                      x_teacher_token: Optional[str] = Header(default=None)):
+    if not section_id:
+        raise HTTPException(status_code=400, detail="section_id is required")
+    _enforce_owned_section(section_id, x_teacher_token)
     db.delete_seat(seat_id)
     updated = db.get_seats(section_id=section_id)
     await ConnectionManager.broadcast_event({"type": "SEATS_UPDATED", "payload": updated})

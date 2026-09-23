@@ -68,11 +68,31 @@ CREATE TABLE IF NOT EXISTS events (
     face_similarity REAL NOT NULL DEFAULT 1.0
 );
 
+CREATE TABLE IF NOT EXISTS teachers (
+    id TEXT PRIMARY KEY DEFAULT ('teacher_' || replace(gen_random_uuid()::text, '-', '')),
+    name TEXT NOT NULL,
+    pin TEXT UNIQUE,
+    department TEXT NOT NULL DEFAULT '',
+    pin_hash TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    auth_version INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE teachers ADD COLUMN IF NOT EXISTS pin TEXT;
+ALTER TABLE teachers ALTER COLUMN pin_hash DROP NOT NULL;
+ALTER TABLE teachers ALTER COLUMN id SET DEFAULT ('teacher_' || replace(gen_random_uuid()::text, '-', ''));
+ALTER TABLE teachers ALTER COLUMN department SET DEFAULT '';
+ALTER TABLE teachers ALTER COLUMN is_active SET DEFAULT 1;
+ALTER TABLE teachers ALTER COLUMN auth_version SET DEFAULT 1;
+ALTER TABLE teachers ALTER COLUMN created_at SET DEFAULT NOW();
+
 CREATE INDEX IF NOT EXISTS idx_events_session ON events (session_id);
 CREATE INDEX IF NOT EXISTS idx_events_seat ON events (seat_id);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events (timestamp_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_seats_section ON seats (section_id);
 CREATE INDEX IF NOT EXISTS idx_students_section ON students (section_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_teachers_pin_unique ON teachers(pin) WHERE pin IS NOT NULL;
 """
 
 try:
