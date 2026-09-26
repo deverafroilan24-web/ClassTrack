@@ -38,3 +38,27 @@ def test_idle_session_is_distinct_from_network_error(monkeypatch):
     assert client.fetch_active_session_result() == (True, None)
     monkeypatch.setattr("api_client.requests.get", lambda *args, **kwargs: Mock(status_code=503))
     assert client.fetch_active_session_result() == (False, None)
+
+
+def test_camera_ignores_other_class_commands_and_polls_selected_section(monkeypatch):
+    messages = []
+    client = DashboardAPIClient(section_id='section-a', on_session_command=messages.append)
+    client.session_id = 'session-a'
+    client._handle_ws_message({'type': 'SESSION_STARTED', 'section_id': 'section-b', 'session_id': 'session-b'})
+    client._handle_ws_message({'type': 'SESSION_STOPPED', 'section_id': 'section-b'})
+    assert client.session_id == 'session-a'
+    assert messages == []
+    get = Mock(return_value=Mock(status_code=200, json=lambda: {'id': 'session-a', 'section_id': 'section-a'}))
+    monkeypatch.setattr('api_client.requests.get', get)
+    assert client.fetch_active_session_result()[0]
+    assert get.call_args.kwargs['params'] == {'section_id': 'section-a'}
+
+
+def test_selecting_camera_section_notifies_server():
+    import json
+    client = DashboardAPIClient(section_id='section-a')
+    client._ws_connected = True
+    client._ws = Mock()
+    client.select_section('section-b')
+    assert client.section_id == 'section-b'
+    assert json.loads(client._ws.send.call_args.args[0]) == {'type': 'SELECT_SECTION', 'section_id': 'section-b'}

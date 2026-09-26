@@ -22,7 +22,8 @@ def live_class(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard, "db", database)
     monkeypatch.setattr(dashboard, "EDGE_API_KEY", "test-edge-key")
     dashboard.edge_selected_section_id = None
-    dashboard.podium_queue.clear()
+    dashboard.queues.clear()
+    database.create_teacher("Administrator", "", "ADMIN", "Test-password-2026", is_admin=True, account_id="teacher_master")
     section = database.create_section("Test class", "Testing", "Room 1", teacher_id="teacher_master")
     seat = database.register_student(section["id"], "Student One", "S001")
     token = dashboard._create_teacher_token()
@@ -34,7 +35,7 @@ def live_class(tmp_path, monkeypatch):
         )
         assert started.status_code == 201, started.text
         yield client, database, section, seat, token, started.json()
-    dashboard.podium_queue.clear()
+    dashboard.queues.clear()
 
 
 def event(section, seat, session, event_id, status="VALID", reason="VALID_HAND_RAISE", timestamp=1000):
@@ -56,9 +57,9 @@ def test_raise_is_saved_once_and_lower_releases_queue(live_class):
     ledger = client.get(f"/api/recitation/ledger?section_id={section['id']}", headers=teacher_headers).json()
     assert ledger[0]["total_raises"] == 1
     assert ledger[0]["latest_queue_pos"] == 1
-    dashboard.podium_queue.clear()
+    dashboard.queues.clear()
     dashboard._restore_live_queue()
-    assert dashboard.podium_queue.get_entry(seat["id"]).queue_position == 1
+    assert dashboard.session_queue(session["id"]).get_entry(seat["id"]).queue_position == 1
 
     award = client.post("/api/events/raise-one/award", headers=teacher_headers)
     assert award.status_code == 200, award.text
@@ -132,7 +133,8 @@ def test_reassigned_desk_does_not_keep_previous_student_raise(live_class):
     assert client.post(
         "/api/events/ingest", json=event(section, seat, session, "old-raise"), headers=edge_headers
     ).status_code == 200
-    database.register_student(section["id"], "Student Two", "S002", seat_id=seat["id"])
+    replacement = database.enroll_student(section["id"], "Student Two", "S002")
+    database.assign_student_to_seat(seat["id"], replacement["id"])
     assert client.get("/api/edge/status").json()["podium_active"] == 0
     ledger = client.get(f"/api/recitation/ledger?section_id={section['id']}", headers=teacher_headers).json()
     assert ledger[0]["student_name"] == "Student Two"

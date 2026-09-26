@@ -8,6 +8,7 @@ Handles:
 """
 
 import json
+from urllib.parse import quote
 import queue
 import threading
 import time
@@ -26,7 +27,9 @@ class DashboardAPIClient:
         base_url: str = "http://127.0.0.1:8000",
         api_key: str = "",
         on_session_command: Optional[Callable[[dict], None]] = None,
+        section_id: str = "",
     ):
+        self.section_id = section_id
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.on_session_command = on_session_command
@@ -112,7 +115,7 @@ class DashboardAPIClient:
     def fetch_active_session_result(self) -> tuple[bool, Optional[Dict[str, Any]]]:
         """Distinguish an idle dashboard from a failed request."""
         try:
-            resp = requests.get(f"{self.base_url}/api/sessions/active", headers=self._headers(), timeout=5)
+            resp = requests.get(f"{self.base_url}/api/sessions/active", params={"section_id": self.section_id} if self.section_id else {}, headers=self._headers(), timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
                 self._session_id = data.get("id") if data else None
@@ -233,7 +236,7 @@ class DashboardAPIClient:
             try:
                 ws = websocket.WebSocket()
                 ws_headers = {"X-Edge-Key": self.api_key} if self.api_key else {}
-                ws.connect(ws_url, timeout=5, header=ws_headers)
+                ws.connect(ws_url + ("?section_id=" + quote(self.section_id, safe="") if self.section_id else ""), timeout=5, header=ws_headers)
                 with self._ws_lock:
                     self._ws = ws
                 self._ws_connected = True
@@ -277,12 +280,25 @@ class DashboardAPIClient:
                 time.sleep(backoff_sec)
                 backoff_sec = min(12.0, backoff_sec * 1.5)
 
+    def select_section(self, section_id):
+        if not section_id or section_id == self.section_id:
+            return
+        self.section_id = section_id
+        self._session_id = None
+        with self._ws_lock:
+            if self._ws_connected and self._ws:
+                self._ws.send(json.dumps({'type': 'SELECT_SECTION', 'section_id': section_id}))
+
     def _handle_ws_message(self, msg: dict):
         """Handle commands from the web dashboard."""
         msg_type = msg.get("type", "")
 
+        if msg.get("section_id") and self.section_id and msg["section_id"] != self.section_id:
+            return
+
         if msg_type == "EDGE_INIT":
             active = msg.get("active_session")
+            self.section_id = msg.get("selected_section_id") or self.section_id
             if active:
                 self._session_id = active.get("id")
                 print(f"[APIClient] Active session: {self._session_id}")

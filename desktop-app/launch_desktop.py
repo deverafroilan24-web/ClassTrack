@@ -89,6 +89,7 @@ class CameraNodeApp:
         self.api_client = DashboardAPIClient(
             base_url=dashboard_url,
             api_key=api_key,
+            section_id=section_id,
             on_session_command=self._on_session_command,
         )
 
@@ -129,6 +130,7 @@ class CameraNodeApp:
             if incoming:
                 print(f"[CameraNode] Synced {len(self.sections)} section(s) via WebSocket. Active: {sec_name}")
             self._set_active_session(active)
+            self.api_client.select_section(self.section_id)
             if not active and selected_section_id:
                 self._set_camera_section(selected_section_id)
             if incoming:
@@ -163,6 +165,8 @@ class CameraNodeApp:
             self.section_id = section_id
             self._match_section_index()
             selected = self.section_id
+            if hasattr(self.api_client, "select_section"):
+                self.api_client.select_section(selected)
             if changed:
                 self.vision_worker.set_session_id(None)
                 self.vision_worker.set_seats([])
@@ -179,7 +183,7 @@ class CameraNodeApp:
             if section.get("id") == self.section_id:
                 self.current_section_idx = i
                 return
-        if self.sections and not self._active_session_id:
+        if len(self.sections) == 1 and not self._active_session_id:
             self.current_section_idx = 0
             self.section_id = self.sections[0]["id"]
 
@@ -200,6 +204,8 @@ class CameraNodeApp:
                 if section_changed:
                     self.vision_worker.set_seats([])
             selected = self.section_id
+            if hasattr(self.api_client, "select_section"):
+                self.api_client.select_section(selected)
         if session_id:
             print(f"[CameraNode] Active session: {session_id} (Section: {selected})")
             if changed:
@@ -351,6 +357,7 @@ class CameraNodeApp:
                 return
             self.current_section_idx = (self.current_section_idx + 1) % len(self.sections)
             self.section_id = self.sections[self.current_section_idx]["id"]
+            self.api_client.select_section(self.section_id)
             self.vision_worker.set_seats([])
             sec_name = self._section_name()
         print(f"[CameraNode] Switched to section: {sec_name}")
@@ -509,7 +516,7 @@ def main():
     parser.add_argument("--url", type=str, default=WEB_DASHBOARD_URL, help="Web Dashboard URL")
     parser.add_argument("--cam", type=str, default=VIDEO_SOURCE, help="Camera index or video file path")
     parser.add_argument("--model", type=str, default=YOLO_MODEL, help="YOLO model name")
-    parser.add_argument("--section", type=str, default=SECTION_ID, help="Section ID to load")
+    parser.add_argument("--section", "--section-id", type=str, default=SECTION_ID, help="Section ID to load")
     parser.add_argument("--confidence", type=float, default=DETECTION_CONFIDENCE, help="Detection confidence")
     args = parser.parse_args()
 

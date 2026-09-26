@@ -1078,3 +1078,72 @@ body.guest-mode main {
   aside { top: 102px !important; }
   #role-badge { white-space: nowrap; }
 }
+
+
+/* Classroom workspace: restrained surfaces, readable type, clear interaction. */
+:root { --primary: #183b50; --primary-hover: #20546a; --primary-light: #eef5f7; --text-muted: #64748b; }
+body { background: #f5f7f8; }
+main { padding: 24px !important; }
+main > .view-panel { max-width: 1440px; margin-inline: auto; }
+header { box-shadow: none !important; }
+header h1 { letter-spacing: -.03em; }
+aside { width: 244px; }
+.nav-tab { min-height: 44px; text-align: left; line-height: 1.3; }
+.nav-tab svg { flex-shrink: 0; }
+.nav-tab[aria-current="page"] { background: #eef5f7 !important; color: #183b50 !important; }
+button, a, input, select { -webkit-tap-highlight-color: transparent; }
+button { min-height: 36px; }
+button:disabled { opacity: .55; cursor: wait; }
+:where(button, a, input, select):focus-visible { outline: 3px solid #5b98ae; outline-offset: 3px; }
+input, select { color: #1e293b; }
+input::placeholder { color: #64748b; }
+input:invalid:not(:placeholder-shown):not([type="checkbox"]) { border-color: #b45353; }
+h2, h3 { letter-spacing: -.025em; }
+.rounded-xl, .rounded-2xl { border-radius: 10px; }
+.shadow-2xl { box-shadow: 0 12px 40px #102a3b18 !important; }
+.animate-pulse { animation: none !important; }
+#welcome-portal { background: #edf2f4; }
+#welcome-portal > div { border: 1px solid #dce3e7; padding: 36px; }
+#welcome-title { max-width: 360px; font-size: 30px; font-weight: 650; letter-spacing: -.04em; line-height: 1.15; }
+#welcome-choices > button { border-width: 1px; background: white; }
+#teacher-login-form label { margin-top: 16px; }
+#teacher-login-form input:not([type="checkbox"]) { font-size: 16px; min-height: 48px; }
+#view-teachers form { max-width: 900px; }
+.admin-entry { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 71; font-size: 12px; color: #475569; padding: 8px 14px; border-radius: 6px; background: #edf2f4; }
+body:has(#welcome-portal.hidden) .admin-entry { display: none; }
+.responsive-table { overflow-x: auto; }
+@media (max-width: 1023px) {
+  aside { width: 100%; }
+  .nav-tab { width: auto !important; flex-shrink: 0; white-space: nowrap; }
+  aside nav { padding-bottom: 4px; }
+}
+@media (max-width: 640px) {
+  main { padding: 12px !important; }
+  header { padding-inline: 12px !important; min-height: 64px; height: auto !important; gap: 12px; }
+  header > div { min-width: 0; }
+  #role-controls { gap: 4px; flex-wrap: wrap; justify-content: flex-end; max-width: 165px; }
+  #role-badge { font-size: 10px; max-width: 165px; overflow-wrap: anywhere; }
+  #header-clock { display: none; }
+  button, select, input:not([type="checkbox"]) { min-height: 44px; }
+  input, select { font-size: 16px !important; }
+  #welcome-portal { align-items: flex-start; padding: 20px 12px 56px; overflow-y: auto; }
+  #welcome-portal > div { padding: 24px; margin-block: auto; max-height: none; }
+  #welcome-title { font-size: 26px; }
+  .admin-entry { bottom: 4px; }
+  .fixed[role="dialog"] { overscroll-behavior: contain; }
+  #guest-access-panel { width: 100%; justify-content: space-between; }
+  #live-class-banner-title { overflow-wrap: anywhere; }
+  #teachers-table-body td { overflow-wrap: anywhere; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+
+@media (max-width: 640px) {
+  header { flex-direction: row; align-items: center !important; height: 88px !important; }
+  header > div:first-child { flex-shrink: 0; }
+  header > div:last-child { margin-left: auto; }
+  #role-controls { width: auto; }
+  #role-badge { white-space: normal; }
+  aside { top: 88px !important; }
+  #toast-container { pointer-events: none; }
+  #toast-container > div { pointer-events: auto; padding: 12px; }
+}

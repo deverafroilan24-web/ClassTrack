@@ -3,8 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ClassTrack — Classroom Participation Monitoring System</title>
-  <link rel="icon" type="image/png" href="/client/desk_icon.png">
+  <title>ClassTrack | Classroom workspace</title>
+  <meta name="theme-color" content="#183b50">
+  <link rel="icon" type="image/svg+xml" href="/client/favicon.svg">
   <!-- Tailwind CSS Framework CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -13,12 +14,12 @@
         extend: {
           colors: {
             brand: {
-              50: '#eff6ff',
-              100: '#dbeafe',
-              600: '#2563eb',
-              700: '#1d4ed8',
-              800: '#1e40af',
-              900: '#1e3a8a',
+              50: '#eef5f7',
+              100: '#dceaf0',
+              600: '#24647d',
+              700: '#20546a',
+              800: '#183b50',
+              900: '#122e3d',
             }
           }
         }
@@ -92,13 +93,13 @@
 
         <button id="nav-teachers" class="nav-tab hidden w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition" data-view="teachers" onclick="showView('teachers')">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.196-2.032M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.196-2.032M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
-          <span>Teachers</span>
+          <span>Account administration</span>
         </button>
 
       </nav>
 
       <div class="hidden lg:block px-5 py-3 border-t border-slate-200 text-xs text-slate-400">
-        ClassTrack Enterprise v1.0
+        ClassTrack · Classroom workspace
       </div>
     </aside>
 
@@ -462,15 +463,18 @@
         <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-4">
           <div>
             <h2 class="text-lg font-bold text-slate-900">Teacher Accounts</h2>
-            <p class="text-xs text-slate-500">Add teachers with their own sign-in code. Each teacher sees only their sections and sessions.</p>
+            <p class="text-xs text-slate-500">Create and manage teacher credentials. Passwords are never displayed after saving.</p>
           </div>
-          <form id="teacher-create-form" class="grid grid-cols-1 md:grid-cols-4 gap-3 items-end" onsubmit="createTeacher(event)">
+          <form id="teacher-create-form" class="grid grid-cols-1 md:grid-cols-2 gap-4 items-end" onsubmit="createTeacher(event)">
             <label class="text-xs font-semibold text-slate-700">Teacher name<input id="new-teacher-name" required maxlength="120" class="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" placeholder="Teacher name"></label>
             <label class="text-xs font-semibold text-slate-700">Department<input id="new-teacher-department" maxlength="120" class="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" placeholder="Department (optional)"></label>
-            <label class="text-xs font-semibold text-slate-700">Sign-in code<input id="new-teacher-pin" required minlength="4" maxlength="32" autocomplete="new-password" class="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" placeholder="At least 4 characters"></label>
+            <label class="text-xs font-semibold text-slate-700">Teacher ID<input id="new-teacher-id" required maxlength="64" pattern="[A-Za-z0-9._\/\-]+" autocomplete="off" class="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" placeholder="e.g. T-2026-001"></label>
+            <label class="text-xs font-semibold text-slate-700">Password<input id="new-teacher-password" type="password" required minlength="12" maxlength="128" autocomplete="new-password" class="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" placeholder="At least 12 characters"></label>
+            <label id="teacher-active-field" class="hidden text-sm flex items-center gap-2"><input id="new-teacher-active" type="checkbox" checked> Account enabled</label>
+            <button type="button" id="teacher-edit-cancel" onclick="resetTeacherForm()" class="hidden border border-slate-300 rounded-lg px-4 py-2">Cancel edit</button>
             <button id="teacher-create-submit" class="bg-brand-700 hover:bg-brand-800 text-white font-semibold text-sm px-4 py-2 rounded-lg">Add Teacher</button>
           </form>
-          <p id="teacher-admin-message" class="hidden text-sm rounded-lg px-3 py-2"></p>
+          <p id="teacher-admin-message" role="status" class="hidden text-sm rounded-lg px-3 py-2"></p>
           <div class="responsive-table border border-slate-200 rounded-lg overflow-hidden">
             <table class="w-full text-left text-sm">
               <thead class="bg-slate-50 text-slate-600 text-xs uppercase"><tr><th class="px-4 py-3">Teacher</th><th class="px-4 py-3">Department</th><th class="px-4 py-3">Status</th><th class="px-4 py-3 text-right">Action</th></tr></thead>
@@ -542,8 +546,8 @@
   <div id="welcome-portal" class="fixed inset-0 z-[70] bg-slate-950/75 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
     <div class="w-full max-w-lg rounded-2xl bg-white p-6 sm:p-8 shadow-2xl max-h-[95dvh] overflow-y-auto">
       <div class="w-12 h-12 rounded-xl bg-brand-800 text-white flex items-center justify-center text-xl font-bold mb-4">CT</div>
-      <h2 id="welcome-title" class="text-xl sm:text-2xl font-bold text-slate-900">ClassTrack — Classroom Participation Monitoring</h2>
-      <p class="text-sm text-slate-600 mt-2">Choose how you want to enter the classroom dashboard.</p>
+      <h2 id="welcome-title" class="text-xl sm:text-2xl font-bold text-slate-900">Your classroom, in focus.</h2>
+      <p class="text-sm text-slate-600 mt-2">Sign in to manage your classes, or join a live session with a viewing code.</p>
       <div id="welcome-choices" class="grid sm:grid-cols-2 gap-3 mt-6">
         <button type="button" onclick="showTeacherLogin()" class="text-left rounded-xl border-2 border-brand-200 bg-brand-50 p-4 hover:border-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-700">
           <span class="block text-base font-bold text-brand-900">Login as Teacher</span>
@@ -555,14 +559,12 @@
         </button>
       </div>
       <form id="teacher-login-form" onsubmit="submitTeacherLogin(event)" class="hidden mt-6 space-y-4">
-        <label for="teacher-pin-input" class="block text-sm font-semibold text-slate-800">Teacher Login Key</label>
-        <input id="teacher-pin-input" type="password" inputmode="numeric" autocomplete="off" required class="w-full rounded-lg border border-slate-300 px-4 py-3 text-lg tracking-widest focus:outline-none focus:ring-2 focus:ring-brand-700" placeholder="Enter your key">
-        <div class="rounded-lg bg-slate-50 border border-slate-200 p-2.5 text-xs text-slate-600">
-          <p class="font-semibold text-slate-700 mb-1">Available Teacher Keys:</p>
-          <div id="available-teacher-keys" class="grid grid-cols-2 gap-1 text-[11px] font-mono">
-            <span class="col-span-2 text-slate-500">Loading teacher keys…</span>
-          </div>
-        </div>
+        <label for="teacher-id-input" class="block text-sm font-semibold text-slate-800">Teacher ID</label>
+        <input id="teacher-id-input" name="username" type="text" autocomplete="username" required maxlength="64" pattern="[A-Za-z0-9._\/\-]+" class="w-full rounded-lg border border-slate-300 px-4 py-3" placeholder="Your assigned teacher ID" autocapitalize="none" spellcheck="false">
+        <label for="teacher-password-input" class="block text-sm font-semibold text-slate-800">Password</label>
+        <input id="teacher-password-input" name="password" type="password" autocomplete="current-password" required maxlength="128" class="w-full rounded-lg border border-slate-300 px-4 py-3" placeholder="Enter your password">
+        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" onchange="document.getElementById('teacher-password-input').type = this.checked ? 'text' : 'password'"> Show password</label>
+        <p class="text-xs text-slate-500">Contact your administrator to create an account or reset your password.</p>
         <p id="teacher-login-error" role="alert" class="hidden text-sm font-medium text-rose-700"></p>
         <div class="flex gap-2">
           <button type="button" onclick="showWelcomeChoices()" class="flex-1 rounded-lg border border-slate-300 px-4 py-2.5 font-semibold text-slate-700">Back</button>
@@ -584,7 +586,7 @@
   <!-- MODAL: REGISTER / ENROLL STUDENT (1-SHOT PHOTO & BIOMETRIC EMBEDDING) -->
   <!-- MODAL: REGISTER / ADD NEW STUDENT -->
   <div id="modal-register-student" class="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center hidden z-50 p-4">
-    <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4 max-h-[90dvh] overflow-y-auto">
       <div class="flex justify-between items-center pb-2 border-b border-slate-100">
         <div>
           <h3 class="text-base font-bold text-slate-900">Add Student to Section</h3>
@@ -595,13 +597,13 @@
 
       <form id="form-register-student" onsubmit="submitRegisterStudent(event)" class="space-y-4 text-xs">
         <div>
-          <label class="block font-semibold text-slate-700 mb-1">Student Full Name: <span class="text-rose-500">*</span></label>
-          <input type="text" id="reg-student-name" required placeholder="e.g. Juan Dela Cruz" class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-700">
+          <label for="reg-student-name" class="block font-semibold text-slate-700 mb-1">Student Full Name: <span class="text-rose-500">*</span></label>
+          <input type="text" id="reg-student-name" maxlength="120" required placeholder="e.g. Juan Dela Cruz" class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-700">
         </div>
 
         <div>
-          <label class="block font-semibold text-slate-700 mb-1">Student ID Number:</label>
-          <input type="text" id="reg-student-id" placeholder="e.g. 2023-0145" class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-700">
+          <label for="reg-student-id" class="block font-semibold text-slate-700 mb-1">Student ID Number: <span class="text-rose-500">*</span></label>
+          <input type="text" id="reg-student-id" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._\/\-]*" placeholder="e.g. 2023-0145" class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-700">
         </div>
 
         <div>
@@ -632,12 +634,12 @@
       <h3 class="text-base font-bold text-slate-900 mb-3">Create Course Section</h3>
       <form id="form-new-section" onsubmit="submitNewSection(event)" class="space-y-4 text-xs">
         <div>
-          <label class="block font-semibold text-slate-700 mb-1">Section Name:</label>
-          <input type="text" id="sec-name" placeholder="e.g. BSCS 3-B" required class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-700">
+          <label for="sec-name" class="block font-semibold text-slate-700 mb-1">Section Name:</label>
+          <input type="text" id="sec-name" maxlength="120" placeholder="e.g. BSCS 3-B" required class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-700">
         </div>
         <div>
-          <label class="block font-semibold text-slate-700 mb-1">Course / Subject:</label>
-          <input type="text" id="sec-subject" placeholder="e.g. Computer Networks" required class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-700">
+          <label for="sec-subject" class="block font-semibold text-slate-700 mb-1">Course / Subject:</label>
+          <input type="text" id="sec-subject" maxlength="120" placeholder="e.g. Computer Networks" required class="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-700">
         </div>
         <div class="flex justify-end space-x-2 pt-2">
           <button type="button" onclick="closeNewSectionModal()" class="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 font-medium">Cancel</button>
@@ -849,7 +851,8 @@
     </div>
   </div>
 
-  <script src="/client/app.js?v=3.1"></script>
-  <link rel="stylesheet" href="/client/style.css?v=3.1">
+  <script src="/client/app.js?v=4.0" defer></script>
+  <link rel="stylesheet" href="/client/style.css?v=4.0">
+<a class="admin-entry" href="/admin">Administrator sign in</a>
 </body>
 </html>

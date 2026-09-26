@@ -80,7 +80,7 @@ window.fetch = function (input, options = {}) {
   return originalFetch(input, { ...options, headers }).then((response) => {
     if (response.status === 401 && requestToken === (teacherToken || guestToken)) {
       enterGuestMode();
-      showToast("Your access expired. Enter the viewing code or teacher PIN again.", "warning");
+      showToast("Your access expired. Enter the viewing code or teacher ID and password again.", "warning");
     }
     return response;
   });
@@ -96,6 +96,7 @@ function applyRole(nextRole) {
   role = nextRole;
   document.body.classList.toggle("guest-mode", role === "guest");
   document.getElementById("role-controls").classList.remove("hidden");
+  document.getElementById("role-badge").className = "text-[11px] font-medium px-2 py-1 rounded bg-slate-100 text-slate-700";
   document.getElementById("role-badge").textContent = role === "teacher" ? (teacherName ? `Teacher: ${teacherName}` : "Teacher Mode") : "Guest View-Only Mode";
   document.getElementById("btn-switch-teacher").classList.toggle("hidden", role === "teacher");
   document.getElementById("btn-lock-teacher").classList.toggle("hidden", role !== "teacher");
@@ -112,7 +113,7 @@ window.showWelcomeChoices = function () {
   document.getElementById("welcome-choices").classList.remove("hidden");
   document.getElementById("teacher-login-form").classList.add("hidden");
   document.getElementById("guest-login-form").classList.add("hidden");
-  document.getElementById("teacher-pin-input").value = "";
+  document.getElementById("teacher-password-input").value = "";
   document.getElementById("guest-code-input").value = "";
   document.getElementById("teacher-login-error").classList.add("hidden");
   document.getElementById("guest-login-error").classList.add("hidden");
@@ -124,25 +125,9 @@ window.showTeacherLogin = function () {
   document.getElementById("teacher-login-form").classList.remove("hidden");
   document.getElementById("guest-login-form").classList.add("hidden");
   document.getElementById("teacher-login-error").classList.add("hidden");
-  document.getElementById("teacher-pin-input").focus();
-  loadAvailableTeacherKeys();
+  document.getElementById("teacher-password-input").focus();
+  document.getElementById("teacher-id-input").focus();
 };
-
-async function loadAvailableTeacherKeys() {
-  const list = document.getElementById("available-teacher-keys");
-  if (!list) return;
-  list.innerHTML = '<span class="col-span-2 text-slate-500">Loading teacher keys…</span>';
-  try {
-    const response = await originalFetch("/api/auth/teacher-keys", { cache: "no-store" });
-    if (!response.ok) throw new Error("Could not load teacher keys");
-    const teachers = await response.json();
-    list.innerHTML = teachers.length
-      ? teachers.map((teacher) => `<span>• ${escapeHtml(teacher.pin)} : ${escapeHtml(teacher.name)}</span>`).join("")
-      : '<span class="col-span-2 text-slate-500">No teacher keys have been added.</span>';
-  } catch (error) {
-    list.innerHTML = '<span class="col-span-2 text-rose-700">Could not load teacher keys. Check the server connection.</span>';
-  }
-}
 
 window.showGuestLogin = function () {
   document.getElementById("welcome-portal").classList.remove("hidden");
@@ -157,6 +142,9 @@ window.enterGuestMode = function () {
   authGeneration += 1;
   teacherToken = "";
   teacherId = "";
+  teacherName = "";
+  teacherAccounts = [];
+  resetTeacherForm();
   isAdmin = false;
   guestToken = "";
   guestAccessCode = "";
@@ -177,12 +165,13 @@ window.enterGuestMode = function () {
   currentHeatmapData = null;
   seatingViewMode = "seating";
   sessionsHistoryList = [];
-  ["recitation-tbody", "section-roster-tbody", "sessions-history-tbody", "reports-tbody", "modal-session-tbody"]
+  ["recitation-tbody", "section-roster-tbody", "sessions-history-tbody", "reports-tbody", "modal-session-tbody", "teachers-table-body"]
     .forEach((id) => { const element = document.getElementById(id); if (element) element.innerHTML = ""; });
   ["modal-register-student", "modal-new-section", "modal-session-details", "modal-seating-settings"]
     .forEach((id) => document.getElementById(id)?.classList.add("hidden"));
   applyRole("guest");
   showWelcomeChoices();
+  if (["/admin", "/login"].includes(location.pathname)) showTeacherLogin();
 };
 
 window.lockTeacherMode = function () {
@@ -192,18 +181,19 @@ window.lockTeacherMode = function () {
 
 window.submitTeacherLogin = async function (event) {
   event.preventDefault();
-  const pinInput = document.getElementById("teacher-pin-input");
+  const passwordInput = document.getElementById("teacher-password-input");
   const error = document.getElementById("teacher-login-error");
   const submit = document.getElementById("teacher-login-submit");
   submit.disabled = true;
   error.classList.add("hidden");
   try {
-    const response = await originalFetch("/api/auth/verify-pin", {
+    const response = await originalFetch("/api/auth/login", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pin: pinInput.value }),
+      body: JSON.stringify({ login_id: document.getElementById("teacher-id-input").value.trim(), password: passwordInput.value }),
     });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || "Teacher login failed");
+    if (!response.ok) throw new Error(apiError(data, "Teacher login failed"));
+    if (location.pathname === "/admin" && !data.is_admin) throw new Error("An administrator account is required. Use the classroom sign-in page for teacher access.");
     teacherToken = data.token;
     teacherName = data.teacher_name || "";
     teacherId = data.teacher_id || "";
@@ -214,10 +204,11 @@ window.submitTeacherLogin = async function (event) {
     sessionStorage.setItem("classtrack.teacherName", teacherName);
     sessionStorage.setItem("classtrack.teacherId", teacherId);
     sessionStorage.removeItem("classtrack.guestToken");
-    pinInput.value = "";
+    passwordInput.value = "";
     document.getElementById("welcome-portal").classList.add("hidden");
     applyRole("teacher");
     await loadAuthorizedData();
+    showView(location.pathname === "/admin" && isAdmin ? "teachers" : "class");
     initEventsWebSocket();
   } catch (loginError) {
     error.textContent = loginError.message;
@@ -240,7 +231,7 @@ window.submitGuestLogin = async function (event) {
       body: JSON.stringify({ code: codeInput.value.trim() }),
     });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || "Unable to open live queue");
+    if (!response.ok) throw new Error(apiError(data, "Unable to open live queue"));
     guestToken = data.token;
     teacherToken = "";
     authGeneration += 1;
@@ -251,6 +242,7 @@ window.submitGuestLogin = async function (event) {
     document.getElementById("welcome-portal").classList.add("hidden");
     applyRole("guest");
     await loadAuthorizedData();
+    showView(location.pathname === "/admin" && isAdmin ? "teachers" : "class");
     initEventsWebSocket();
   } catch (loginError) {
     error.textContent = loginError.message;
@@ -313,6 +305,7 @@ async function restoreAuth() {
   }
   applyRole("guest");
   showWelcomeChoices();
+  if (["/admin", "/login"].includes(location.pathname)) showTeacherLogin();
   return false;
 }
 
@@ -378,7 +371,7 @@ window.showToast = function (message, type = "info", durationMs = 3500) {
 
   toast.innerHTML = `
     ${iconSvg}
-    <span class="flex-1">${message}</span>
+    <span class="flex-1">${escapeHtml(message)}</span>
     <button class="text-white/60 hover:text-white ml-2 text-base leading-none">&times;</button>
   `;
 
@@ -389,6 +382,7 @@ window.showToast = function (message, type = "info", durationMs = 3500) {
   };
   closeBtn.onclick = dismiss;
 
+  while (container.children.length >= 2) container.firstElementChild.remove();
   container.appendChild(toast);
   requestAnimationFrame(() => {
     toast.classList.remove("opacity-0", "translate-y-2");
@@ -456,6 +450,7 @@ window.showConfirmModal = function ({
 // ============================================================================
 window.showView = function (viewName) {
   if (role === "guest" && viewName !== "class") viewName = "class";
+  if (viewName === "teachers" && !isAdmin) viewName = "class";
   document.querySelectorAll(".nav-tab").forEach((tab) => {
     const isActive = tab.dataset.view === viewName;
     tab.setAttribute("aria-current", isActive ? "page" : "false");
@@ -495,18 +490,50 @@ window.showView = function (viewName) {
   }
 };
 
-async function fetchTeachers() {
-  const response = await fetch("/api/admin/teachers");
-  if (!response.ok) throw new Error("Could not load teacher accounts");
-  const teachers = await response.json();
-  const tbody = document.getElementById("teachers-table-body");
-  tbody.innerHTML = teachers.map((teacher) => `<tr>
-    <td class="px-4 py-3 font-semibold text-slate-800">${escapeHtml(teacher.name)}</td>
-    <td class="px-4 py-3 text-slate-600">${escapeHtml(teacher.department || "—")}</td>
-    <td class="px-4 py-3"><span class="px-2 py-1 rounded-full text-xs ${teacher.is_active ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}">${teacher.is_active ? "Active" : "Inactive"}</span></td>
-    <td class="px-4 py-3 text-right">${teacher.is_active ? `<button onclick="deactivateTeacher('${escapeHtml(teacher.id)}')" class="text-rose-700 hover:underline font-semibold">Deactivate</button>` : ""}</td>
-  </tr>`).join("") || '<tr><td colspan="4" class="px-4 py-6 text-center text-slate-500">No teacher accounts yet.</td></tr>';
+let teacherAccounts = [];
+let editingTeacherId = '';
+function apiError(data, fallback = 'Unable to save changes') {
+  return Array.isArray(data.detail) ? data.detail.map(e => `${e.loc?.slice(1).join(' ') || 'Input'}: ${e.msg}`).join('; ') : (data.detail || fallback);
 }
+async function fetchTeachers() {
+  try {
+    const response = await fetch('/api/admin/teachers');
+    if (!response.ok) throw new Error('Could not load teacher accounts');
+    teacherAccounts = await response.json();
+    const tbody = document.getElementById('teachers-table-body');
+    tbody.innerHTML = teacherAccounts.map((teacher, index) => `<tr>
+      <td class="px-4 py-3"><strong>${escapeHtml(teacher.name)}</strong><div class="text-xs text-slate-500">${escapeHtml(teacher.login_id)}</div></td>
+      <td class="px-4 py-3">${escapeHtml(teacher.department || '—')}</td>
+      <td class="px-4 py-3">${teacher.is_active ? (teacher.has_password ? 'Enabled' : 'Password setup required') : 'Disabled'}</td>
+      <td class="px-4 py-3"><div class="flex gap-3"><button onclick="editTeacher(${index})" class="text-brand-800 font-semibold">Edit</button><button onclick="deactivateTeacher(${index})" class="text-rose-700 font-semibold">Delete access</button></div></td>
+    </tr>`).join('') || '<tr><td colspan="4" class="px-4 py-8 text-center text-slate-500">No teacher accounts. Add your first teacher above.</td></tr>';
+    tbody.querySelectorAll('tr').forEach(row => labelResponsiveCells(row, ['Teacher / ID', 'Department', 'Status', 'Actions']));
+  } catch (error) { showTeacherAdminMessage(error.message, true); }
+}
+window.resetTeacherForm = function () {
+  editingTeacherId = '';
+  document.getElementById('teacher-create-form').reset();
+  document.getElementById('new-teacher-password').required = true;
+  document.getElementById('new-teacher-password').placeholder = 'At least 12 characters';
+  document.getElementById('teacher-create-submit').textContent = 'Add teacher';
+  document.getElementById('teacher-edit-cancel').classList.add('hidden');
+  document.getElementById('teacher-active-field').classList.add('hidden');
+};
+window.editTeacher = function (index) {
+  const teacher = teacherAccounts[index];
+  editingTeacherId = teacher.id;
+  document.getElementById('new-teacher-name').value = teacher.name;
+  document.getElementById('new-teacher-department').value = teacher.department;
+  document.getElementById('new-teacher-id').value = teacher.login_id;
+  document.getElementById('new-teacher-password').value = '';
+  document.getElementById('new-teacher-password').required = !teacher.has_password;
+  document.getElementById('new-teacher-password').placeholder = teacher.has_password ? 'Leave blank to keep current password' : 'Set a password to enable sign-in';
+  document.getElementById('new-teacher-active').checked = !!teacher.is_active;
+  document.getElementById('teacher-create-submit').textContent = 'Save changes';
+  document.getElementById('teacher-edit-cancel').classList.remove('hidden');
+  document.getElementById('teacher-active-field').classList.remove('hidden');
+  document.getElementById('new-teacher-name').focus();
+};
 
 async function reconcileLiveSession() {
   if (!teacherToken && !guestToken) return;
@@ -549,40 +576,42 @@ function showTeacherAdminMessage(message, isError = false) {
 
 window.createTeacher = async function (event) {
   event.preventDefault();
-  const button = document.getElementById("teacher-create-submit");
+  const button = document.getElementById('teacher-create-submit');
+  if (button.disabled) return;
   button.disabled = true;
   try {
-    const response = await fetch("/api/admin/teachers", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: document.getElementById("new-teacher-name").value.trim(),
-        department: document.getElementById("new-teacher-department").value.trim(),
-        pin: document.getElementById("new-teacher-pin").value.trim(),
-      }),
+    const payload = {
+      name: document.getElementById('new-teacher-name').value.trim(),
+      department: document.getElementById('new-teacher-department').value.trim(),
+      login_id: document.getElementById('new-teacher-id').value.trim(),
+      password: document.getElementById('new-teacher-password').value,
+    };
+    if (editingTeacherId) {
+      if (!payload.password) delete payload.password;
+      payload.is_active = document.getElementById('new-teacher-active').checked;
+    }
+    const response = await fetch('/api/admin/teachers' + (editingTeacherId ? '/' + encodeURIComponent(editingTeacherId) : ''), {
+      method: editingTeacherId ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
     });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || "Could not add teacher");
-    document.getElementById("teacher-create-form").reset();
-    showTeacherAdminMessage("Teacher account added.");
+    if (!response.ok) throw new Error(apiError(data));
+    showTeacherAdminMessage(editingTeacherId ? 'Credentials updated. Previous sign-ins have expired.' : 'Teacher account created. Share credentials privately with the teacher.');
+    resetTeacherForm();
     await fetchTeachers();
-  } catch (error) {
-    showTeacherAdminMessage(error.message, true);
-  } finally {
-    button.disabled = false;
-  }
+  } catch (error) { showTeacherAdminMessage(error.message, true); }
+  finally { button.disabled = false; }
 };
-
-window.deactivateTeacher = async function (teacherIdToDeactivate) {
-  if (!window.confirm("Deactivate this teacher account? Their sections and session history will remain in the database.")) return;
+window.deactivateTeacher = async function (index) {
+  const teacher = teacherAccounts[index];
+  if (!await showConfirmModal({title: 'Delete teacher access', message: `Remove sign-in access for ${teacher.name}? Their active class will end. Class records are retained.`, confirmText: 'Delete access', cancelText: 'Cancel', isDanger: true})) return;
   try {
-    const response = await fetch(`/api/admin/teachers/${encodeURIComponent(teacherIdToDeactivate)}`, { method: "DELETE" });
+    const response = await fetch('/api/admin/teachers/' + encodeURIComponent(teacher.id), {method: 'DELETE'});
     const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || "Could not deactivate teacher");
-    showTeacherAdminMessage("Teacher account deactivated. Their current sign-in is now invalid.");
+    if (!response.ok) throw new Error(apiError(data));
+    resetTeacherForm();
+    showTeacherAdminMessage('Teacher access deleted and previous sign-ins expired.');
     await fetchTeachers();
-  } catch (error) {
-    showTeacherAdminMessage(error.message, true);
-  }
+  } catch (error) { showTeacherAdminMessage(error.message, true); }
 };
 
 function labelResponsiveCells(row, labels) {
@@ -605,7 +634,7 @@ function renderGuestQueue() {
         <span class="guest-queue-person"><strong>${escapeHtml(student.student_name)}</strong><small>${escapeHtml(student.label)}</small></span>
         <span class="guest-queue-time" data-raised-at="${Number(student.raised_at_ms) || 0}">0:00</span>
       </div>`).join("")
-    : `<div class="guest-queue-empty"><span class="guest-empty-icon">✦</span><strong>Queue is clear</strong><p>Raised hands will appear here as the class progresses.</p></div>`;
+    : `<div class="guest-queue-empty"><span class="guest-empty-icon">—</span><strong>Queue is clear</strong><p>Raised hands will appear here as the class progresses.</p></div>`;
   updateGuestTimers();
 }
 
@@ -763,7 +792,7 @@ async function syncCameraSection(sectionId) {
     });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
-      throw new Error(data.detail || "Camera section sync failed");
+      throw new Error(apiError(data, "Camera section sync failed"));
     }
   } catch (error) {
     console.warn("Could not sync selected section to Camera Node:", error);
@@ -826,15 +855,15 @@ function renderSectionsCards() {
         }">
           ${isCurrent ? "Active" : "Select"}
         </span>
-        <button onclick="deleteSection('${sec.id}', '${sec.name}')" title="Delete section" class="btn-delete-section text-slate-300 hover:text-rose-600 hover:bg-rose-50 rounded p-1 transition opacity-60 group-hover:opacity-100">
+        <button onclick="deleteSection('${sec.id}', decodeURIComponent('${encodeURIComponent(sec.name).replaceAll("'", "%27")}'))" title="Delete section" class="btn-delete-section text-slate-300 hover:text-rose-600 hover:bg-rose-50 rounded p-1 transition opacity-60 group-hover:opacity-100">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
         </button>
       </div>
 
       <!-- Center: Section Title Prominent & Centered -->
       <div class="py-1">
-        <h4 class="text-base font-extrabold text-slate-900 tracking-tight leading-snug">${sec.name}</h4>
-        <p class="text-xs text-slate-500 font-medium truncate max-w-[140px] mx-auto mt-0.5">${sec.subject}</p>
+        <h4 class="text-base font-extrabold text-slate-900 tracking-tight leading-snug">${escapeHtml(sec.name)}</h4>
+        <p class="text-xs text-slate-500 font-medium truncate max-w-[140px] mx-auto mt-0.5">${escapeHtml(sec.subject)}</p>
       </div>
 
       <!-- Bottom: Compact Student Count -->
@@ -894,7 +923,7 @@ function renderSectionRoster() {
     sectionRosterTbody.innerHTML = `
       <tr>
         <td colspan="6" class="px-4 py-8 text-center bg-slate-50/50">
-          <p class="text-xs text-slate-400 font-medium">No students registered in ${activeSec ? activeSec.name : "this section"}. Use the "+ Add Student to Section" button above to add students.</p>
+          <p class="text-xs text-slate-400 font-medium">No students registered in ${escapeHtml(activeSec ? activeSec.name : "this section")}. Use the "+ Add Student to Section" button above to add students.</p>
         </td>
       </tr>
     `;
@@ -914,17 +943,17 @@ function renderSectionRoster() {
     const tr = document.createElement("tr");
     tr.className = "hover:bg-slate-50";
     tr.innerHTML = `
-      <td class="px-4 py-3 font-mono text-xs text-slate-600">${stud.student_id_number || stud.id}</td>
+      <td class="px-4 py-3 font-mono text-xs text-slate-600">${escapeHtml(stud.student_id_number || stud.id)}</td>
       <td class="px-4 py-3 font-semibold text-slate-900">
         <div class="flex items-center space-x-2">
           <div class="w-6 h-6 rounded-full ${color.bg} ${color.text} font-bold text-[10px] flex items-center justify-center shrink-0 border ${color.border}">
-            ${initials}
+            ${escapeHtml(initials)}
           </div>
-          <span>${stud.name}</span>
+          <span>${escapeHtml(stud.name)}</span>
         </div>
       </td>
       <td class="px-4 py-3 text-xs text-slate-600 font-medium">
-        ${seatLabel ? `<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-blue-50 text-blue-800 border border-blue-200">${seatLabel}</span>` : '<span class="text-amber-600 italic font-normal">Unassigned (Pool)</span>'}
+        ${seatLabel ? `<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-blue-50 text-blue-800 border border-blue-200">${escapeHtml(seatLabel)}</span>` : '<span class="text-amber-600 italic font-normal">Unassigned (Pool)</span>'}
       </td>
       <td class="px-4 py-3">
         <span class="px-2 py-0.5 rounded text-xs font-semibold ${
@@ -943,7 +972,7 @@ function renderSectionRoster() {
               <svg class="w-3.5 h-3.5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"/></svg>
             </button>
           ` : ""}
-          <button onclick="deleteStudent('${stud.id}', '${stud.name}')" title="Delete Student" class="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition">
+          <button onclick="deleteStudent('${stud.id}', decodeURIComponent('${encodeURIComponent(stud.name).replaceAll("'", "%27")}'))" title="Delete Student" class="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition">
             <svg class="w-3.5 h-3.5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
           </button>
         </div>
@@ -995,6 +1024,7 @@ window.openRegisterStudentModal = function () {
     currentSeats.forEach((s) => {
       const opt = document.createElement("option");
       opt.value = s.id;
+      opt.disabled = !!s.student_id;
       const occupant = s.student_name && !s.student_name.startsWith("Empty (") ? ` (Occupied: ${s.student_name})` : " (Empty)";
       opt.textContent = `${s.label}${occupant}`;
       select.appendChild(opt);
@@ -1032,6 +1062,7 @@ window.submitRegisterStudent = async function (e) {
   }
 
   const submitBtn = document.getElementById("btn-submit-enroll");
+  if (submitBtn?.disabled) return;
   if (submitBtn) {
     submitBtn.disabled = true;
     submitBtn.textContent = "Saving...";
@@ -1054,7 +1085,7 @@ window.submitRegisterStudent = async function (e) {
     });
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.detail || "Enrollment failed");
+      throw new Error(apiError(errData, "Enrollment failed"));
     }
 
     closeRegisterStudentModal();
@@ -1085,7 +1116,7 @@ window.submitNewSection = async function (e) {
   const name = document.getElementById("sec-name").value.trim();
   const subject = document.getElementById("sec-subject").value.trim();
   const roomEl = document.getElementById("sec-room");
-  const room = roomEl ? roomEl.value.trim() : "";
+  const room = roomEl ? roomEl.value.trim() : "Room 204";
 
   try {
     const res = await fetch("/api/sections", {
@@ -1167,11 +1198,11 @@ function renderRecitationLedger() {
     // Queue position badge — clean, no ms timing
     let podiumBadge = `<span class="text-slate-400 font-mono text-[11px]">—</span>`;
     if (activeSession && isRaised && student.latest_queue_pos === 1) {
-      podiumBadge = `<span class="inline-flex items-center space-x-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[11px]"><span>🥇</span><span>1st</span></span>`;
+      podiumBadge = `<span class="inline-flex items-center space-x-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[11px]"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="5"/><path d="m8 12-1 9 5-3 5 3-1-9"/></svg><span>1st</span></span>`;
     } else if (activeSession && isRaised && student.latest_queue_pos === 2) {
-      podiumBadge = `<span class="inline-flex items-center space-x-1 px-1.5 py-0.5 rounded bg-slate-200 text-slate-800 font-semibold text-[11px]"><span>🥈</span><span>2nd</span></span>`;
+      podiumBadge = `<span class="inline-flex items-center space-x-1 px-1.5 py-0.5 rounded bg-slate-200 text-slate-800 font-semibold text-[11px]"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="5"/><path d="m8 12-1 9 5-3 5 3-1-9"/></svg><span>2nd</span></span>`;
     } else if (activeSession && isRaised && student.latest_queue_pos === 3) {
-      podiumBadge = `<span class="inline-flex items-center space-x-1 px-1.5 py-0.5 rounded bg-orange-100 text-orange-900 font-semibold text-[11px]"><span>🥉</span><span>3rd</span></span>`;
+      podiumBadge = `<span class="inline-flex items-center space-x-1 px-1.5 py-0.5 rounded bg-orange-100 text-orange-900 font-semibold text-[11px]"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="5"/><path d="m8 12-1 9 5-3 5 3-1-9"/></svg><span>3rd</span></span>`;
     } else if (activeSession && isRaised && student.latest_queue_pos > 3) {
       podiumBadge = `<span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-semibold text-[11px]">#${student.latest_queue_pos}</span>`;
     }
@@ -1179,12 +1210,12 @@ function renderRecitationLedger() {
     let actionBtn = "";
     if (role === "guest") {
       actionBtn = (student.latest_earned_point === 1)
-        ? `<span class="text-emerald-700 font-bold text-[11px] bg-emerald-50 px-1.5 py-0.5 rounded">✓ +1</span>`
+        ? `<span class="text-emerald-700 font-bold text-[11px] bg-emerald-50 px-1.5 py-0.5 rounded">Awarded +1</span>`
         : `<span class="text-[11px] text-slate-400 italic">Idle</span>`;
     } else if (!activeSession) {
       actionBtn = `<span class="text-[11px] text-slate-400 italic">Idle</span>`;
     } else if (student.latest_earned_point === 1) {
-      actionBtn = `<span class="text-emerald-700 font-bold text-[11px] bg-emerald-50 px-1.5 py-0.5 rounded">✓ +1</span>`;
+      actionBtn = `<span class="text-emerald-700 font-bold text-[11px] bg-emerald-50 px-1.5 py-0.5 rounded">Awarded +1</span>`;
     } else if (isSeatMismatch && canAward) {
       actionBtn = `
         <div class="flex flex-col items-end space-y-0.5">
@@ -1231,7 +1262,7 @@ function renderRecitationLedger() {
 
     const initials = getStudentInitials(student.student_name);
     const color = getStudentAvatarColor(student.student_name);
-    const avatarHtml = `<div class="w-6 h-6 rounded-full ${color.bg} ${color.text} font-bold text-[10px] flex items-center justify-center shrink-0 border ${color.border}">${initials}</div>`;
+    const avatarHtml = `<div class="w-6 h-6 rounded-full ${color.bg} ${color.text} font-bold text-[10px] flex items-center justify-center shrink-0 border ${color.border}">${escapeHtml(initials)}</div>`;
 
     const tr = document.createElement("tr");
     tr.className = `${
@@ -1251,8 +1282,8 @@ function renderRecitationLedger() {
         <div class="flex items-center space-x-2">
           ${avatarHtml}
           <div class="min-w-0">
-            <span class="font-bold text-slate-900 text-xs leading-tight block truncate">${student.student_name}</span>
-            <div class="text-[10px] text-slate-500 font-medium truncate">${student.label}</div>
+            <span class="font-bold text-slate-900 text-xs leading-tight block truncate">${escapeHtml(student.student_name)}</span>
+            <div class="text-[10px] text-slate-500 font-medium truncate">${escapeHtml(student.label)}</div>
           </div>
         </div>
       </td>
@@ -1278,7 +1309,7 @@ window.awardStudentPoint = async function (eventId, force = false) {
     const res = await fetch(`/api/events/${eventId}/award${qs}`, { method: "POST" });
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.detail || "Award failed");
+      throw new Error(apiError(errData, "Award failed"));
     }
     showToast(force ? "Override applied: +1 Point awarded" : "+1 Recitation point awarded", "success");
     fetchRecitationLedger();
@@ -1307,7 +1338,7 @@ window.awardDirectStudent = async function (seatId) {
     const res = await fetch(`/api/seats/${encodeURIComponent(seatId)}/award?section_id=${encodeURIComponent(sectionId)}`, { method: "POST" });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      throw new Error(data.detail || "Manual point award failed");
+      throw new Error(apiError(data, "Manual point award failed"));
     }
     showToast("Manual participation point awarded", "success");
     fetchRecitationLedger();
@@ -1842,12 +1873,12 @@ function renderClassroomDesks() {
       card.className = `p-2.5 rounded-xl border transition flex flex-col justify-between aspect-square w-full min-w-[135px] max-w-[160px] min-h-[145px] shadow-2xs ${heatBg}`;
       card.innerHTML = `
         <div class="flex justify-between items-center pb-1 border-b border-slate-200/50">
-          <span class="text-[11px] font-mono font-bold px-1.5 py-0.5 rounded bg-white/80 border border-slate-200 leading-none">${seat.label}</span>
+          <span class="text-[11px] font-mono font-bold px-1.5 py-0.5 rounded bg-white/80 border border-slate-200 leading-none">${escapeHtml(seat.label)}</span>
           ${activityBadge}
         </div>
         <div class="my-auto text-center py-1">
-          <h4 class="text-xs font-bold line-clamp-2 leading-tight break-words px-0.5" title="${seat.student_name}">
-            ${hasStudent ? seat.student_name : '<span class="text-slate-400 italic">Empty Desk</span>'}
+          <h4 class="text-xs font-bold line-clamp-2 leading-tight break-words px-0.5" title="${escapeHtml(seat.student_name)}">
+            ${hasStudent ? escapeHtml(seat.student_name) : '<span class="text-slate-400 italic">Empty Desk</span>'}
           </h4>
           <div class="text-[10px] font-semibold mt-1 flex items-center justify-center text-slate-600">
             <span>Raises: <strong>${raises}</strong></span>
@@ -1883,13 +1914,13 @@ function renderClassroomDesks() {
 
         const initials = getStudentInitials(seat.student_name);
         const color = getStudentAvatarColor(seat.student_name);
-        const avatarHtml = `<div class="w-10 h-10 rounded-full ${color.bg} ${color.text} font-extrabold text-sm flex items-center justify-center shrink-0 mx-auto border-2 ${color.border} shadow-2xs tracking-wider">${initials}</div>`;
+        const avatarHtml = `<div class="w-10 h-10 rounded-full ${color.bg} ${color.text} font-extrabold text-sm flex items-center justify-center shrink-0 mx-auto border-2 ${color.border} shadow-2xs tracking-wider">${escapeHtml(initials)}</div>`;
 
         card.innerHTML = `
           <!-- Top Row: Desk label & unassign button, Attendance status pill -->
           <div class="flex justify-between items-center pb-1 border-b border-slate-100">
             <div class="flex items-center space-x-1">
-              <span class="text-[11px] font-mono font-bold text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200 leading-none">${seat.label}</span>
+              <span class="text-[11px] font-mono font-bold text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200 leading-none">${escapeHtml(seat.label)}</span>
               <button onclick="unassignSeat('${seat.id}')" title="Return student to pool" class="text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded p-0.5 text-xs font-bold leading-none transition">
                 &times;
               </button>
@@ -1904,10 +1935,10 @@ function renderClassroomDesks() {
           <!-- Center: Avatar + FULL VIEWABLE STUDENT NAME (2-line wrap) + Student ID (No Points) -->
           <div class="my-auto py-1 flex flex-col items-center justify-center text-center">
             ${avatarHtml}
-            <h4 class="text-xs font-bold text-slate-900 line-clamp-2 leading-tight break-words mt-1.5 px-1" title="${seat.student_name}">
-              ${seat.student_name}
+            <h4 class="text-xs font-bold text-slate-900 line-clamp-2 leading-tight break-words mt-1.5 px-1" title="${escapeHtml(seat.student_name)}">
+              ${escapeHtml(seat.student_name)}
             </h4>
-            ${seat.student_id_number ? `<div class="text-[10px] font-mono text-slate-400 mt-0.5 truncate max-w-full px-1">${seat.student_id_number}</div>` : ""}
+            ${seat.student_id_number ? `<div class="text-[10px] font-mono text-slate-400 mt-0.5 truncate max-w-full px-1">${escapeHtml(seat.student_id_number)}</div>` : ""}
           </div>
 
           <!-- Bottom Row: Mark Absent / Mark Present Action Button -->
@@ -1930,7 +1961,7 @@ function renderClassroomDesks() {
         card.className = "group relative p-2.5 rounded-xl border-2 border-dashed border-slate-200 bg-slate-50/70 hover:bg-brand-50/40 hover:border-brand-400 transition-all flex flex-col justify-between items-center aspect-square w-full min-w-[135px] max-w-[160px] min-h-[145px] text-center select-none shadow-2xs";
         card.innerHTML = `
           <div class="w-full flex justify-between items-center pb-1 border-b border-slate-100">
-            <span class="text-[11px] font-mono font-bold text-slate-500 bg-white px-1.5 py-0.5 rounded border border-slate-200 leading-none">${seat.label}</span>
+            <span class="text-[11px] font-mono font-bold text-slate-500 bg-white px-1.5 py-0.5 rounded border border-slate-200 leading-none">${escapeHtml(seat.label)}</span>
             <span class="text-[10px] font-medium text-slate-400">Empty</span>
           </div>
           <div class="my-auto flex flex-col items-center justify-center py-1">
@@ -2009,18 +2040,18 @@ function renderUnassignedStudentTray() {
 
     const initials = getStudentInitials(student.name);
     const color = getStudentAvatarColor(student.name);
-    const avatarHtml = `<div class="w-7 h-7 rounded-full ${color.bg} ${color.text} font-bold text-xs flex items-center justify-center shrink-0 border ${color.border}">${initials}</div>`;
+    const avatarHtml = `<div class="w-7 h-7 rounded-full ${color.bg} ${color.text} font-bold text-xs flex items-center justify-center shrink-0 border ${color.border}">${escapeHtml(initials)}</div>`;
 
     card.innerHTML = `
       <div class="flex items-center space-x-2.5 overflow-hidden">
         ${avatarHtml}
         <div class="overflow-hidden">
-          <div class="text-xs font-bold text-slate-900 truncate">${student.name}</div>
+          <div class="text-xs font-bold text-slate-900 truncate">${escapeHtml(student.name)}</div>
           <div class="text-[10px] text-slate-400 font-mono truncate">${student.student_id_number || "No ID"}</div>
         </div>
       </div>
       <div class="flex items-center space-x-1 shrink-0">
-        <button onclick="event.stopPropagation(); deleteStudent('${student.id}', '${student.name}')" title="Delete Student" class="p-1 text-slate-300 hover:text-rose-600 hover:bg-rose-50 rounded transition">
+        <button onclick="event.stopPropagation(); deleteStudent('${student.id}', decodeURIComponent('${encodeURIComponent(student.name).replaceAll("'", "%27")}'))" title="Delete Student" class="p-1 text-slate-300 hover:text-rose-600 hover:bg-rose-50 rounded transition">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
         </button>
         <span class="text-slate-300 group-hover:text-brand-600 transition" title="Drag to place on desk">
@@ -2381,12 +2412,12 @@ function renderSessionsHistory() {
         <div class="text-xs text-slate-500">${timeStr}</div>
       </td>
       <td class="px-4 py-3">
-        <div class="font-semibold text-slate-800">${sess.title}</div>
+        <div class="font-semibold text-slate-800">${escapeHtml(sess.title)}</div>
         <div class="text-xs text-slate-400 font-mono">${sess.id}</div>
       </td>
       <td class="px-4 py-3">
         <span class="px-2 py-0.5 rounded text-xs font-semibold bg-brand-50 text-brand-800 border border-brand-200">
-          ${sess.section_name || sess.section_id || "All"}
+          ${escapeHtml(sess.section_name || sess.section_id || "All")}
         </span>
       </td>
       <td class="px-4 py-3 text-center font-bold text-slate-800">${sess.total_raises || 0}</td>
@@ -2456,8 +2487,8 @@ window.openSessionDetailsModal = async function (sessionId) {
     (data.ledger || []).forEach((st) => {
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td class="px-3 py-2 font-mono text-xs text-slate-600">${st.label}</td>
-        <td class="px-3 py-2 font-bold text-slate-900">${st.student_name}</td>
+        <td class="px-3 py-2 font-mono text-xs text-slate-600">${escapeHtml(st.label)}</td>
+        <td class="px-3 py-2 font-bold text-slate-900">${escapeHtml(st.student_name)}</td>
         <td class="px-3 py-2 text-center font-semibold text-slate-800">${st.total_raises}</td>
         <td class="px-3 py-2 text-center font-bold text-emerald-700">${st.total_points}</td>
       `;
@@ -2541,7 +2572,7 @@ window.fetchClassGrades = async function () {
     grades.forEach((st) => {
       const initials = getStudentInitials(st.student_name);
       const color = getStudentAvatarColor(st.student_name);
-      const avatarHtml = `<div class="w-8 h-8 rounded-full ${color.bg} ${color.text} font-bold text-xs flex items-center justify-center shrink-0 border ${color.border}">${initials}</div>`;
+      const avatarHtml = `<div class="w-8 h-8 rounded-full ${color.bg} ${color.text} font-bold text-xs flex items-center justify-center shrink-0 border ${color.border}">${escapeHtml(initials)}</div>`;
 
       const tr = document.createElement("tr");
       tr.className = "hover:bg-slate-50 transition";
@@ -2550,13 +2581,13 @@ window.fetchClassGrades = async function () {
           <div class="flex items-center space-x-2.5">
             ${avatarHtml}
             <div>
-              <div class="font-bold text-slate-900">${st.student_name}</div>
+              <div class="font-bold text-slate-900">${escapeHtml(st.student_name)}</div>
               <div class="text-xs text-slate-400 font-mono">${st.student_id_number || "--"}</div>
             </div>
           </div>
         </td>
         <td class="px-4 py-3 font-semibold text-slate-700 text-xs">
-          <span class="px-2 py-0.5 rounded bg-slate-100 border border-slate-200">${st.assigned_seat_label || "Unassigned"}</span>
+          <span class="px-2 py-0.5 rounded bg-slate-100 border border-slate-200">${escapeHtml(st.assigned_seat_label || "Unassigned")}</span>
         </td>
         <td class="px-4 py-3 text-center font-bold text-slate-800">${st.total_raises || 0}</td>
         <td class="px-4 py-3 text-center font-bold text-emerald-700">${st.total_points || 0}</td>
@@ -2608,12 +2639,12 @@ function updateSessionUI() {
 
     if (badge) {
       badge.className = "px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 animate-pulse";
-      badge.textContent = role === "guest" ? "Live session" : `Active Class Session: ${activeSession.title}`;
+      badge.textContent = role === "guest" ? "Live session" : "Live";
     }
     if (desc) {
       const section = sectionsList.find((item) => item.id === activeSession.section_id);
       desc.textContent = role === "guest"
-        ? `${section?.name || "Class"}${section?.room ? ` • ${section.room}` : ""} · Live hand-raise order`
+        ? `${section?.name || "Class"}${section?.room ? ` • ${escapeHtml(section.room)}` : ""} · Live hand-raise order`
         : `Started: ${new Date(activeSession.started_at).toLocaleTimeString()} • Tracking student participation and hand raises in real-time.`;
     }
     if (bannerStart) bannerStart.classList.add("hidden");
@@ -2685,7 +2716,7 @@ window.startClassSession = async function () {
     });
     if (!res.ok) {
       const errJson = await res.json().catch(() => ({}));
-      throw new Error(errJson.detail || "Failed to start class session");
+      throw new Error(apiError(errJson, "Failed to start class session"));
     }
     const data = await res.json();
     activeSession = data;
@@ -2783,9 +2814,10 @@ function initEventsWebSocket() {
   ws.onclose = (event) => {
     if (eventsSocket !== ws) return;
     eventsSocket = null;
-    if (event.code === 1008 && role === "guest") {
+    if (event.code === 1008) {
+      const message = role === "teacher" ? "Your sign-in expired or credentials changed. Please sign in again." : "Viewing code expired. Ask your teacher for the current code.";
       enterGuestMode();
-      showToast("Viewing code expired. Ask your teacher for the current code.", "warning");
+      showToast(message, "warning");
     } else if (teacherToken || guestToken) {
       socketReconnectTimer = setTimeout(initEventsWebSocket, 2000);
     }
@@ -3017,11 +3049,22 @@ async function pushCameraSettings(partial, notify = false) {
 
 // Initial Boot
 async function bootApp() {
+  if (location.pathname === '/admin') {
+    document.getElementById('welcome-title').textContent = 'Account administration';
+    document.querySelector('#welcome-title + p').textContent = 'Sign in with an administrator account to manage teacher credentials.';
+    document.querySelector('label[for="teacher-id-input"]').textContent = 'Administrator ID';
+    document.getElementById('teacher-id-input').placeholder = 'Administrator ID';
+    document.getElementById('teacher-login-submit').textContent = 'Sign in';
+    const link = document.querySelector('.admin-entry');
+    link.href = '/';
+    link.textContent = 'Back to classroom';
+  }
   startClock();
   const authenticated = await restoreAuth();
   if (authenticated) {
-    showView("class");
+    showView(location.pathname === "/admin" && isAdmin ? "teachers" : "class");
     await loadAuthorizedData();
+    showView(location.pathname === "/admin" && isAdmin ? "teachers" : "class");
     initEventsWebSocket();
   }
   fetchEdgeStatus();
