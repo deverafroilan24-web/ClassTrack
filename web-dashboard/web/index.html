@@ -91,10 +91,7 @@
           <span>Camera Settings</span>
         </button>
 
-        <button id="nav-teachers" class="nav-tab hidden w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition" data-view="teachers" onclick="showView('teachers')">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.196-2.032M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.196-2.032M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
-          <span>Account administration</span>
-        </button>
+
 
       </nav>
 
@@ -457,31 +454,6 @@
             </table>
           </div>
         </div>
-      </div>
-
-      <div id="view-teachers" class="view-panel hidden space-y-4">
-        <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-4">
-          <div>
-            <h2 class="text-lg font-bold text-slate-900">Teacher Accounts</h2>
-            <p class="text-xs text-slate-500">Create and manage teacher credentials. Passwords are never displayed after saving.</p>
-          </div>
-          <form id="teacher-create-form" class="grid grid-cols-1 md:grid-cols-2 gap-4 items-end" onsubmit="createTeacher(event)">
-            <label class="text-xs font-semibold text-slate-700">Teacher name<input id="new-teacher-name" required maxlength="120" class="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" placeholder="Teacher name"></label>
-            <label class="text-xs font-semibold text-slate-700">Department<input id="new-teacher-department" maxlength="120" class="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" placeholder="Department (optional)"></label>
-            <label class="text-xs font-semibold text-slate-700">Teacher ID<input id="new-teacher-id" required maxlength="64" pattern="[A-Za-z0-9._\/\-]+" autocomplete="off" class="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" placeholder="e.g. T-2026-001"></label>
-            <label class="text-xs font-semibold text-slate-700">Password<input id="new-teacher-password" type="password" required minlength="12" maxlength="128" autocomplete="new-password" class="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" placeholder="At least 12 characters"></label>
-            <label id="teacher-active-field" class="hidden text-sm flex items-center gap-2"><input id="new-teacher-active" type="checkbox" checked> Account enabled</label>
-            <button type="button" id="teacher-edit-cancel" onclick="resetTeacherForm()" class="hidden border border-slate-300 rounded-lg px-4 py-2">Cancel edit</button>
-            <button id="teacher-create-submit" class="bg-brand-700 hover:bg-brand-800 text-white font-semibold text-sm px-4 py-2 rounded-lg">Add Teacher</button>
-          </form>
-          <p id="teacher-admin-message" role="status" class="hidden text-sm rounded-lg px-3 py-2"></p>
-          <div class="responsive-table border border-slate-200 rounded-lg overflow-hidden">
-            <table class="w-full text-left text-sm">
-              <thead class="bg-slate-50 text-slate-600 text-xs uppercase"><tr><th class="px-4 py-3">Teacher</th><th class="px-4 py-3">Department</th><th class="px-4 py-3">Status</th><th class="px-4 py-3 text-right">Action</th></tr></thead>
-              <tbody id="teachers-table-body" class="divide-y divide-slate-100"></tbody>
-            </table>
-          </div>
-        </section>
       </div>
 
       <!-- CAMERA SETTINGS (Remote Control for Edge Camera Node) -->

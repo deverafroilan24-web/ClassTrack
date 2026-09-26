@@ -362,6 +362,11 @@ async def enforce_teacher_access(request: Request, call_next):
         if not photo or db.get_section_owner(photo['section_id']) != teacher_id:
             return JSONResponse({'detail': 'Photo not found'}, status_code=404)
     if path.startswith("/api/"):
+        token = request.headers.get("x-teacher-token")
+        account = _decode_token(token) or {}
+        if account.get("is_admin") and _valid_teacher_token(token):
+            if not (path.startswith("/api/admin/teachers") or path in ("/api/auth/session", "/api/auth/login")):
+                return JSONResponse({"detail": "Administrator access is limited to teacher accounts"}, status_code=403)
         guest_get = {"/api/sections", "/api/sessions/active", "/api/recitation/ledger"}
         public_get = {"/api/edge/status", "/api/auth/guest-session"}
         public_post = {"/api/auth/login", "/api/auth/guest", "/api/events/ingest"}
@@ -1385,6 +1390,9 @@ async def ws_events(websocket: WebSocket):
     try:
         auth_message = json.loads(await asyncio.wait_for(websocket.receive_text(), timeout=5))
         teacher = _valid_teacher_token(auth_message.get("teacher_token"))
+        if teacher and (_decode_token(auth_message.get("teacher_token")) or {}).get("is_admin"):
+            await websocket.close(code=1008)
+            return
         guest_session = None if teacher else _guest_session(auth_message.get("guest_token"))
         if not teacher and not guest_session:
             await websocket.close(code=1008)
@@ -1519,6 +1527,9 @@ if web_path.exists():
     app.mount("/client", StaticFiles(directory=str(web_path), html=True), name="web_client")
 
     @app.get("/admin")
+    async def serve_admin():
+        return FileResponse(str(web_path / "admin.html"))
+
     @app.get("/login")
     @app.get("/")
     async def serve_index():

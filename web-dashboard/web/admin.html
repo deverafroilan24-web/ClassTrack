@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Teacher accounts | ClassTrack Admin</title>
+  <link rel="icon" href="/client/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/client/admin.css">
+  <script src="/client/admin.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="/admin"><img src="/client/favicon.svg" width="36" height="36" alt=""><span>ClassTrack <small>Admin</small></span></a>
+    <button id="admin-logout" class="button secondary" hidden>Sign out</button>
+  </header>
+  <main>
+    <section id="welcome-portal" class="login-card">
+      <span class="eyebrow">ADMINISTRATOR ACCESS</span>
+      <h1>Teacher accounts</h1>
+      <p class="muted">Sign in to add, edit or delete teacher accounts.</p>
+      <form id="admin-login-form">
+        <label for="teacher-id-input">Administrator ID</label>
+        <input id="teacher-id-input" autocomplete="username" required maxlength="64">
+        <label for="teacher-password-input">Password</label>
+        <input id="teacher-password-input" type="password" autocomplete="current-password" required maxlength="128">
+        <label class="check"><input id="show-password" type="checkbox"> Show password</label>
+        <p id="teacher-login-error" class="notice error" role="alert" hidden></p>
+        <button id="teacher-login-submit" class="button primary" type="submit">Sign in</button>
+      </form>
+      <a class="back-link" href="/login">Teacher sign in</a>
+    </section>
+
+    <section id="view-teachers" hidden>
+      <div class="page-heading">
+        <div><span class="eyebrow">MINI ADMIN PANEL</span><h1>Teacher accounts</h1><p class="muted">Manage teacher sign-in credentials.</p></div>
+        <button id="add-teacher" class="button primary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Add teacher</button>
+      </div>
+      <p id="teacher-admin-message" class="notice" role="status" hidden></p>
+      <section class="accounts-card" aria-label="Teacher account list">
+        <div class="list-heading"><h2>Teachers</h2><span id="teacher-count" class="muted"></span></div>
+        <table>
+          <thead><tr><th>Teacher</th><th>Department</th><th>Status</th><th class="actions-heading">Actions</th></tr></thead>
+          <tbody id="teachers-table-body"></tbody>
+        </table>
+        <div id="accounts-empty" class="empty-state" hidden><h2>No teacher accounts</h2><p class="muted">Select Add teacher to create the first account.</p></div>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="teacher-editor" aria-labelledby="editor-title">
+    <form id="teacher-create-form">
+      <div class="dialog-heading"><h2 id="editor-title">Add teacher</h2><button type="button" class="icon-button" id="editor-close" aria-label="Close form"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+      <p class="muted">Enter the credentials the teacher will use to sign in.</p>
+      <div class="form-grid">
+        <div><label for="new-teacher-name">Teacher name</label><input id="new-teacher-name" required maxlength="120" autocomplete="off"></div>
+        <div><label for="new-teacher-department">Department <span class="muted">(optional)</span></label><input id="new-teacher-department" maxlength="120"></div>
+        <div><label for="new-teacher-id">Teacher ID</label><input id="new-teacher-id" required maxlength="64" pattern="[A-Za-z0-9._\/\-]+" autocomplete="off"></div>
+        <div><label for="new-teacher-password">Password</label><input id="new-teacher-password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required><small id="password-hint" class="muted">At least 12 characters.</small></div>
+      </div>
+      <label class="check" id="teacher-active-field" hidden><input id="new-teacher-active" type="checkbox" checked> Account enabled</label>
+      <p id="editor-error" class="notice error" role="alert" hidden></p>
+      <div class="dialog-actions"><button type="button" class="button secondary" id="teacher-edit-cancel">Cancel</button><button id="teacher-create-submit" class="button primary" type="submit">Add teacher</button></div>
+    </form>
+  </dialog>
+  <dialog id="delete-dialog" aria-labelledby="delete-title">
+    <h2 id="delete-title">Delete teacher account?</h2>
+    <p id="delete-description"></p>
+    <p class="muted">Sign-in access will be removed. Existing class records are retained.</p>
+    <p id="delete-error" class="notice error" role="alert" hidden></p>
+    <div class="dialog-actions"><button class="button secondary" id="delete-cancel">Cancel</button><button class="button danger" id="delete-confirm">Delete account</button></div>
+  </dialog>
+</body>
+</html>

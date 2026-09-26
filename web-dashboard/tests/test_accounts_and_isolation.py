@@ -129,6 +129,53 @@ def test_rate_limit_and_invalid_credentials(school):
     assert client.post('/api/auth/login', json={'login_id': 'T-002', 'password': PASSWORD}).status_code == 200
 
 
+def test_admin_is_limited_to_teacher_accounts(school):
+    client, db, admin, one, two = school
+    assert client.get('/api/admin/teachers', headers=admin).status_code == 200
+    for path in ('/api/sections', '/api/sessions/active', '/api/camera/settings'):
+        assert client.get(path, headers=admin).status_code == 403
+    assert client.post('/api/sections', headers=admin, json={'name': 'Forbidden'}).status_code == 403
+
+
+def test_auto_enroll_multiple_desks_reuses_empty_without_overwriting(school):
+    client, db, admin, one, two = school
+    classroom = section(client, one)
+    path = f"/api/sections/{classroom['id']}/students/enroll"
+    for index in range(16):
+        name = 'Empty Person' if index == 0 else f'Student {index}'
+        response = client.post(path, headers=one, json={'name': name, 'student_id_number': f'A-{index}', 'auto_create_desk': True})
+        assert response.status_code == 200, response.text
+    seats = db.get_seats(classroom['id'])
+    assert len(seats) == 16
+    assert len({(seat['grid_row'], seat['grid_col']) for seat in seats}) == 16
+    assert len({seat['student_id'] for seat in seats}) == 16
+    vacated = seats[4]
+    db.assign_student_to_seat(vacated['id'], None)
+    response = client.post(path, headers=one, json={'name': 'Replacement', 'student_id_number': 'A-NEW', 'auto_create_desk': True})
+    assert response.status_code == 200, response.text
+    seats = db.get_seats(classroom['id'])
+    assert len(seats) == 16
+    assert next(s for s in seats if s['id'] == vacated['id'])['student_name'] == 'Replacement'
+
+
+def test_postgres_literal_percent_with_parameters():
+    from backend.database import PgConnectionWrapper
+    class Cursor:
+        def execute(self, sql, params=None):
+            self.sql, self.params = sql, params
+    class Connection:
+        def __init__(self):
+            self.result = Cursor()
+        def cursor(self):
+            return self.result
+    connection = Connection()
+    wrapper = PgConnectionWrapper(connection)
+    wrapper.execute("SELECT id FROM seats WHERE section_id = ? AND student_name LIKE 'Empty%'", ('section',))
+    assert connection.result.sql == "SELECT id FROM seats WHERE section_id = %s AND student_name LIKE 'Empty%%'"
+    wrapper.execute("SELECT id FROM seats WHERE student_name LIKE 'Empty%'")
+    assert connection.result.sql.endswith("LIKE 'Empty%'")
+
+
 def test_duplicate_enrollment_and_scope(school):
     client, db, admin, one, two = school
     a, b = section(client, one), section(client, two)

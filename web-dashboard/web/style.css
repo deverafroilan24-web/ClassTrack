@@ -1147,3 +1147,9 @@ body:has(#welcome-portal.hidden) .admin-entry { display: none; }
   #toast-container { pointer-events: none; }
   #toast-container > div { pointer-events: auto; padding: 12px; }
 }
+
+/* Let attendance cards grow around touch targets instead of forcing a square. */
+.attendance-desk { aspect-ratio: auto; min-height: 210px; height: auto; gap: 10px; }
+.attendance-desk > div { flex-shrink: 0; }
+.attendance-desk > div:last-child { width: 100%; margin-top: auto; }
+.attendance-desk button[title="Toggle student attendance"] { min-height: 36px; font-size: 11px; }

@@ -189,7 +189,8 @@ class PgConnectionWrapper:
 
     def execute(self, sql: str, params: Optional[Any] = None) -> PgCursorWrapper:
         cur = self.conn.cursor()
-        converted = self._convert_query(sql)
+        # psycopg2 interprets literal percent signs when parameters are supplied.
+        converted = self._convert_query(sql.replace("%", "%%") if params is not None else sql)
         if params is not None:
             cur.execute(converted, params)
         else:
@@ -311,7 +312,7 @@ class DatabaseManager:
 
     def list_teachers(self):
         with self._connect() as conn:
-            return [dict(r) for r in conn.execute("SELECT id, login_id, name, department, is_active, is_admin, created_at, CASE WHEN password_hash IS NOT NULL THEN 1 ELSE 0 END AS has_password FROM teachers WHERE is_admin = 0 ORDER BY name").fetchall()]
+            return [dict(r) for r in conn.execute("SELECT id, login_id, name, department, is_active, is_admin, created_at, CASE WHEN password_hash IS NOT NULL THEN 1 ELSE 0 END AS has_password FROM teachers WHERE is_admin = 0 AND (is_active = 1 OR password_hash IS NOT NULL) ORDER BY name").fetchall()]
 
     def get_teacher(self, teacher_id):
         with self._connect() as conn:
@@ -576,6 +577,10 @@ class DatabaseManager:
         student_id = f"stud_{uuid.uuid4().hex[:8]}"
         now = _now_iso()
         with self._connect() as conn:
+            # Serialize enrollment within a section before claiming or appending a desk.
+            lock = " FOR UPDATE" if self.is_postgres else ""
+            if not conn.execute("SELECT id FROM sections WHERE id = ?" + lock, (section_id,)).fetchone():
+                raise ValueError("Section not found")
             self._reserve_student(conn, section_id, name, student_id_number)
             if assign_to_seat_id:
                 seat = conn.execute("SELECT id FROM seats WHERE id = ? AND section_id = ? AND student_id IS NULL", (assign_to_seat_id, section_id)).fetchone()
@@ -600,14 +605,10 @@ class DatabaseManager:
                     (student_id, name, student_id_number, assign_to_seat_id),
                 )
             elif auto_create_desk:
-                # Find current maximum seat count or empty seats
-                cursor = conn.execute("SELECT COUNT(*) as cnt FROM seats WHERE section_id = ?", (section_id,))
-                cur_count = cursor.fetchone()["cnt"]
-                
                 # Check if there is an existing empty seat to claim first
                 empty_cursor = conn.execute(
-                    "SELECT id FROM seats WHERE section_id = ? AND (student_id IS NULL OR student_name LIKE 'Empty%') ORDER BY grid_row ASC, grid_col ASC LIMIT 1",
-                    (section_id,)
+                    "SELECT id FROM seats WHERE section_id = ? AND student_id IS NULL AND (student_name = '' OR student_name LIKE ?) ORDER BY grid_row ASC, grid_col ASC LIMIT 1",
+                    (section_id, 'Empty%')
                 )
                 first_empty = empty_cursor.fetchone()
                 if first_empty:
@@ -623,15 +624,17 @@ class DatabaseManager:
                     )
                 else:
                     # Dynamically append a new seat
-                    import math
-                    new_idx = cur_count + 1
-                    cols = max(3, math.ceil(math.sqrt(new_idx)))
-                    r = (new_idx - 1) // cols
-                    c = (new_idx - 1) % cols
+                    positions = conn.execute("SELECT grid_row, grid_col FROM seats WHERE section_id = ?", (section_id,)).fetchall()
+                    occupied = {(p['grid_row'], p['grid_col']) for p in positions}
+                    cols = max(3, max((p['grid_col'] + 1 for p in positions), default=3))
+                    index = 0
+                    while divmod(index, cols) in occupied:
+                        index += 1
+                    r, c = divmod(index, cols)
                     row_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
                     row_label = row_letters[r] if r < len(row_letters) else f"R{r+1}"
                     label = f"Desk {row_label}{c+1}"
-                    seat_id = f"seat_{section_id}_{row_label}{c+1}"
+                    seat_id = f"seat_{uuid.uuid4().hex}"
 
                     col_w = 1.0 / max(cols, 1)
                     row_h = 1.0 / max(r + 1, 1)

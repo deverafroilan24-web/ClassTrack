@@ -23,10 +23,10 @@ def live_class(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard, "EDGE_API_KEY", "test-edge-key")
     dashboard.edge_selected_section_id = None
     dashboard.queues.clear()
-    database.create_teacher("Administrator", "", "ADMIN", "Test-password-2026", is_admin=True, account_id="teacher_master")
+    teacher = database.create_teacher("Test teacher", "", "TEACHER", "Test-password-2026", account_id="teacher_master")
     section = database.create_section("Test class", "Testing", "Room 1", teacher_id="teacher_master")
     seat = database.register_student(section["id"], "Student One", "S001")
-    token = dashboard._create_teacher_token()
+    token = dashboard._create_teacher_token(teacher)
     with TestClient(dashboard.app) as client:
         started = client.post(
             "/api/sessions/start",

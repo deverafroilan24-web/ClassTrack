@@ -194,6 +194,12 @@ window.submitTeacherLogin = async function (event) {
     const data = await response.json();
     if (!response.ok) throw new Error(apiError(data, "Teacher login failed"));
     if (location.pathname === "/admin" && !data.is_admin) throw new Error("An administrator account is required. Use the classroom sign-in page for teacher access.");
+    if (data.is_admin) {
+      sessionStorage.setItem("classtrack.adminToken", data.token);
+      sessionStorage.removeItem("classtrack.teacherToken");
+      location.replace("/admin");
+      return;
+    }
     teacherToken = data.token;
     teacherName = data.teacher_name || "";
     teacherId = data.teacher_id || "";
@@ -269,6 +275,12 @@ async function restoreAuth() {
       const response = await originalFetch("/api/auth/session", { headers: { "X-Teacher-Token": teacherToken } });
       if (response.ok) {
         const sessionData = await response.json();
+        if (sessionData.is_admin) {
+          sessionStorage.setItem("classtrack.adminToken", teacherToken);
+          sessionStorage.removeItem("classtrack.teacherToken");
+          location.replace("/admin");
+          return false;
+        }
         teacherName = sessionData.teacher_name || teacherName;
         teacherId = sessionData.teacher_id || teacherId;
         isAdmin = !!sessionData.is_admin;
@@ -1906,7 +1918,7 @@ function renderClassroomDesks() {
       if (hasStudent) {
         card.setAttribute("draggable", "true");
         card.setAttribute("ondragstart", `onDeskCardDragStart(event, '${seat.id}', '${seat.student_id || ""}')`);
-        card.className = `group relative p-2.5 rounded-xl border transition-all cursor-grab active:cursor-grabbing select-none flex flex-col justify-between aspect-square w-full min-w-[135px] max-w-[160px] min-h-[145px] shadow-xs ${
+        card.className = `group relative p-2.5 rounded-xl border transition-all cursor-grab active:cursor-grabbing select-none flex flex-col justify-between attendance-desk w-full min-w-[135px] max-w-[160px] shadow-xs ${
           isPresent
             ? "border-slate-200 bg-white hover:border-brand-600 hover:shadow-md"
             : "border-rose-200 bg-rose-50/30 opacity-85 hover:opacity-100"
@@ -1958,7 +1970,7 @@ function renderClassroomDesks() {
         `;
       } else {
         // Empty Desk Slot (Desk Icon 5310972 with Clear Desk Silhouette)
-        card.className = "group relative p-2.5 rounded-xl border-2 border-dashed border-slate-200 bg-slate-50/70 hover:bg-brand-50/40 hover:border-brand-400 transition-all flex flex-col justify-between items-center aspect-square w-full min-w-[135px] max-w-[160px] min-h-[145px] text-center select-none shadow-2xs";
+        card.className = "group relative p-2.5 rounded-xl border-2 border-dashed border-slate-200 bg-slate-50/70 hover:bg-brand-50/40 hover:border-brand-400 transition-all flex flex-col justify-between items-center attendance-desk w-full min-w-[135px] max-w-[160px] text-center select-none shadow-2xs";
         card.innerHTML = `
           <div class="w-full flex justify-between items-center pb-1 border-b border-slate-100">
             <span class="text-[11px] font-mono font-bold text-slate-500 bg-white px-1.5 py-0.5 rounded border border-slate-200 leading-none">${escapeHtml(seat.label)}</span>
