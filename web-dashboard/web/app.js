@@ -143,8 +143,6 @@ window.enterGuestMode = function () {
   teacherToken = "";
   teacherId = "";
   teacherName = "";
-  teacherAccounts = [];
-  resetTeacherForm();
   isAdmin = false;
   guestToken = "";
   guestAccessCode = "";
@@ -176,7 +174,7 @@ window.enterGuestMode = function () {
 
 window.lockTeacherMode = function () {
   enterGuestMode();
-  showToast("Teacher controls locked", "info");
+  showToast("You have signed out", "info");
 };
 
 window.submitTeacherLogin = async function (event) {
@@ -497,56 +495,12 @@ window.showView = function (viewName) {
     renderClassReports();
   } else if (viewName === "camera") {
     fetchCameraSettings();
-  } else if (viewName === "teachers" && isAdmin) {
-    fetchTeachers();
   }
 };
 
-let teacherAccounts = [];
-let editingTeacherId = '';
 function apiError(data, fallback = 'Unable to save changes') {
   return Array.isArray(data.detail) ? data.detail.map(e => `${e.loc?.slice(1).join(' ') || 'Input'}: ${e.msg}`).join('; ') : (data.detail || fallback);
 }
-async function fetchTeachers() {
-  try {
-    const response = await fetch('/api/admin/teachers');
-    if (!response.ok) throw new Error('Could not load teacher accounts');
-    teacherAccounts = await response.json();
-    const tbody = document.getElementById('teachers-table-body');
-    tbody.innerHTML = teacherAccounts.map((teacher, index) => `<tr>
-      <td class="px-4 py-3"><strong>${escapeHtml(teacher.name)}</strong><div class="text-xs text-slate-500">${escapeHtml(teacher.login_id)}</div></td>
-      <td class="px-4 py-3">${escapeHtml(teacher.department || '—')}</td>
-      <td class="px-4 py-3">${teacher.is_active ? (teacher.has_password ? 'Enabled' : 'Password setup required') : 'Disabled'}</td>
-      <td class="px-4 py-3"><div class="flex gap-3"><button onclick="editTeacher(${index})" class="text-brand-800 font-semibold">Edit</button><button onclick="deactivateTeacher(${index})" class="text-rose-700 font-semibold">Delete access</button></div></td>
-    </tr>`).join('') || '<tr><td colspan="4" class="px-4 py-8 text-center text-slate-500">No teacher accounts. Add your first teacher above.</td></tr>';
-    tbody.querySelectorAll('tr').forEach(row => labelResponsiveCells(row, ['Teacher / ID', 'Department', 'Status', 'Actions']));
-  } catch (error) { showTeacherAdminMessage(error.message, true); }
-}
-window.resetTeacherForm = function () {
-  editingTeacherId = '';
-  document.getElementById('teacher-create-form').reset();
-  document.getElementById('new-teacher-password').required = true;
-  document.getElementById('new-teacher-password').placeholder = 'At least 12 characters';
-  document.getElementById('teacher-create-submit').textContent = 'Add teacher';
-  document.getElementById('teacher-edit-cancel').classList.add('hidden');
-  document.getElementById('teacher-active-field').classList.add('hidden');
-};
-window.editTeacher = function (index) {
-  const teacher = teacherAccounts[index];
-  editingTeacherId = teacher.id;
-  document.getElementById('new-teacher-name').value = teacher.name;
-  document.getElementById('new-teacher-department').value = teacher.department;
-  document.getElementById('new-teacher-id').value = teacher.login_id;
-  document.getElementById('new-teacher-password').value = '';
-  document.getElementById('new-teacher-password').required = !teacher.has_password;
-  document.getElementById('new-teacher-password').placeholder = teacher.has_password ? 'Leave blank to keep current password' : 'Set a password to enable sign-in';
-  document.getElementById('new-teacher-active').checked = !!teacher.is_active;
-  document.getElementById('teacher-create-submit').textContent = 'Save changes';
-  document.getElementById('teacher-edit-cancel').classList.remove('hidden');
-  document.getElementById('teacher-active-field').classList.remove('hidden');
-  document.getElementById('new-teacher-name').focus();
-};
-
 async function reconcileLiveSession() {
   if (!teacherToken && !guestToken) return;
   const generation = authGeneration;
@@ -579,52 +533,6 @@ async function reconcileLiveSession() {
     console.warn("Live session refresh failed", error);
   }
 }
-
-function showTeacherAdminMessage(message, isError = false) {
-  const element = document.getElementById("teacher-admin-message");
-  element.textContent = message;
-  element.className = `text-sm rounded-lg px-3 py-2 ${isError ? "bg-rose-50 text-rose-700" : "bg-emerald-50 text-emerald-700"}`;
-}
-
-window.createTeacher = async function (event) {
-  event.preventDefault();
-  const button = document.getElementById('teacher-create-submit');
-  if (button.disabled) return;
-  button.disabled = true;
-  try {
-    const payload = {
-      name: document.getElementById('new-teacher-name').value.trim(),
-      department: document.getElementById('new-teacher-department').value.trim(),
-      login_id: document.getElementById('new-teacher-id').value.trim(),
-      password: document.getElementById('new-teacher-password').value,
-    };
-    if (editingTeacherId) {
-      if (!payload.password) delete payload.password;
-      payload.is_active = document.getElementById('new-teacher-active').checked;
-    }
-    const response = await fetch('/api/admin/teachers' + (editingTeacherId ? '/' + encodeURIComponent(editingTeacherId) : ''), {
-      method: editingTeacherId ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(apiError(data));
-    showTeacherAdminMessage(editingTeacherId ? 'Credentials updated. Previous sign-ins have expired.' : 'Teacher account created. Share credentials privately with the teacher.');
-    resetTeacherForm();
-    await fetchTeachers();
-  } catch (error) { showTeacherAdminMessage(error.message, true); }
-  finally { button.disabled = false; }
-};
-window.deactivateTeacher = async function (index) {
-  const teacher = teacherAccounts[index];
-  if (!await showConfirmModal({title: 'Delete teacher access', message: `Remove sign-in access for ${teacher.name}? Their active class will end. Class records are retained.`, confirmText: 'Delete access', cancelText: 'Cancel', isDanger: true})) return;
-  try {
-    const response = await fetch('/api/admin/teachers/' + encodeURIComponent(teacher.id), {method: 'DELETE'});
-    const data = await response.json();
-    if (!response.ok) throw new Error(apiError(data));
-    resetTeacherForm();
-    showTeacherAdminMessage('Teacher access deleted and previous sign-ins expired.');
-    await fetchTeachers();
-  } catch (error) { showTeacherAdminMessage(error.message, true); }
-};
 
 function labelResponsiveCells(row, labels) {
   row.classList.add("responsive-row");

@@ -135,3 +135,47 @@ def test_admin_add_edit_delete_on_desktop_and_mobile(browser_server):
         playwright.expect(row).to_have_count(0)
         assert not errors, errors
         browser.close()
+
+
+@pytest.mark.parametrize('width', [390, 1440])
+@pytest.mark.parametrize('account,path,button,key', [
+    ('T-101', '/login', '#btn-lock-teacher', 'classtrack.teacherToken'),
+    ('ADMIN', '/admin', '#admin-logout', 'classtrack.adminToken'),
+])
+def test_logout_clears_session_and_stays_signed_out_after_reload(browser_server, width, account, path, button, key):
+    url, _ = browser_server
+    with playwright.sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={'width': width, 'height': 900})
+        errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        page.goto(url + path)
+        login(page, account)
+        assert page.evaluate('(key) => !!sessionStorage.getItem(key)', key)
+        page.locator(button).click()
+        playwright.expect(page.locator('#welcome-portal')).to_be_visible()
+        assert page.evaluate('(key) => sessionStorage.getItem(key)', key) is None
+        page.reload()
+        playwright.expect(page.locator('#teacher-login-submit')).to_be_visible()
+        playwright.expect(page.locator('#welcome-portal')).to_be_visible()
+        assert page.evaluate('(key) => sessionStorage.getItem(key)', key) is None
+        login(page, account)
+        assert not errors, errors
+        browser.close()
+
+
+def test_expired_teacher_session_returns_to_login(browser_server):
+    url, _ = browser_server
+    with playwright.sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        page.goto(url + '/login')
+        login(page, 'T-101')
+        page.route('**/api/auth/session', lambda route: route.fulfill(status=401, content_type='application/json', body='{"detail":"Session expired"}'))
+        page.evaluate("() => fetch('/api/auth/session')")
+        playwright.expect(page.locator('#welcome-portal')).to_be_visible()
+        assert page.evaluate("sessionStorage.getItem('classtrack.teacherToken')") is None
+        assert not errors, errors
+        browser.close()
