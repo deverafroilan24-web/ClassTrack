@@ -374,7 +374,7 @@ class YOLOPoseEngine:
         """
         Renders clean real-time visual overlays:
         - 100% DYNAMIC Seat Bounding Boxes directly tracking the detected person.
-        - Clean green box on hand raise, neutral clean box when seated.
+        - Green only for the first confirmed raiser; later raisers stay neutral blue.
         - Skeletons (bones & joint dots) turned OFF by default for clean classroom viewing.
         """
         overlay = frame.copy()
@@ -456,17 +456,26 @@ class YOLOPoseEngine:
                 is_valid_raise = eval_res and eval_res.reason_code == "VALID_HAND_RAISE"
                 is_double_hand = eval_res and eval_res.reason_code == "ERR_DOUBLE_HAND_RAISE"
                 is_seat_mismatch = eval_res and eval_res.reason_code == "SEAT_MISMATCH"
+                queue_pos = (podium_entries or {}).get(seat_id, {}).get("queue_pos")
 
                 if is_seat_mismatch:
                     box_color = (0, 0, 240)      # Vivid Crimson Red
                     pill_bg = (0, 0, 180)
                     status_text = f"{seat.student_name} | Wrong Seat"
                     thickness = 3
-                elif is_valid_raise:
+                elif is_valid_raise and seat.is_present and queue_pos == 1:
                     box_color = (0, 220, 0)      # Vivid Emerald Green
                     pill_bg = (0, 150, 0)
-                    status_text = f"{seat.student_name} | HAND RAISED"
+                    status_text = f"{seat.student_name} | FIRST IN QUEUE"
                     thickness = 3
+                elif is_valid_raise:
+                    box_color = (230, 175, 40)   # Neutral blue while waiting
+                    pill_bg = (140, 95, 20)
+                    if seat.is_present and queue_pos:
+                        status_text = f"{seat.student_name} | Waiting #{queue_pos}"
+                    else:
+                        status_text = f"{seat.student_name} | Hand Raised"
+                    thickness = 2
                 elif is_double_hand:
                     box_color = (0, 140, 255)    # Warning Amber / Orange
                     pill_bg = (0, 100, 200)
@@ -496,10 +505,11 @@ class YOLOPoseEngine:
                     u_eval = evaluate_pose_kinematics(u_det.pose)
 
                     if u_eval.reason_code == "VALID_HAND_RAISE":
-                        u_box_color = (0, 220, 0)
-                        u_pill_bg = (0, 150, 0)
+                        # Unmatched people cannot hold a place in the student queue.
+                        u_box_color = (230, 175, 40)
+                        u_pill_bg = (140, 95, 20)
                         u_label = "Student | HAND RAISED"
-                        u_thick = 3
+                        u_thick = 2
                     elif u_eval.reason_code == "ERR_DOUBLE_HAND_RAISE":
                         u_box_color = (0, 140, 255)
                         u_pill_bg = (0, 100, 200)

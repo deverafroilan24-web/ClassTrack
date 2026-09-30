@@ -7,15 +7,19 @@ to send detected gesture events and fetch seat configurations.
 """
 
 import os
+import sys
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Always read the camera's own configuration, including when a shortcut starts
+# the packaged app with a different working directory.
+runtime_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+load_dotenv(runtime_dir / ".env")
+
+APP_VERSION = "1.0.1"
 
 # Remote Web Dashboard URL (where gesture events are sent)
 WEB_DASHBOARD_URL = os.getenv("WEB_DASHBOARD_URL", "https://classtrack-mm41.onrender.com")
-
-# Edge authentication key (must match EDGE_API_KEY on the web-dashboard)
-EDGE_API_KEY = os.getenv("EDGE_API_KEY", "")
 
 # Active section ID to load seat zones for
 SECTION_ID = os.getenv("SECTION_ID", "")

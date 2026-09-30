@@ -25,16 +25,15 @@ class DashboardAPIClient:
     def __init__(
         self,
         base_url: str = "http://127.0.0.1:8000",
-        api_key: str = "",
         on_session_command: Optional[Callable[[dict], None]] = None,
         section_id: str = "",
     ):
         self.section_id = section_id
         self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
         self.on_session_command = on_session_command
         self._http_connected = False
         self._ws_connected = False
+        self._access_denied = False
         self._ws = None
         self._ws_lock = threading.Lock()
         self._ws_thread: Optional[threading.Thread] = None
@@ -45,7 +44,19 @@ class DashboardAPIClient:
 
     @property
     def is_connected(self) -> bool:
-        return self._ws_connected or self._http_connected
+        return not self._access_denied and (self._ws_connected or self._http_connected)
+
+    @property
+    def access_denied(self) -> bool:
+        return self._access_denied
+
+    def _record_access_status(self, status_code: int) -> None:
+        if status_code in (401, 403):
+            self._access_denied = True
+            self._http_connected = False
+        elif status_code == 200:
+            self._access_denied = False
+            self._http_connected = True
 
     @property
     def is_ws_connected(self) -> bool:
@@ -64,10 +75,7 @@ class DashboardAPIClient:
         self._session_id = val
 
     def _headers(self) -> dict:
-        h = {"Content-Type": "application/json"}
-        if self.api_key:
-            h["X-Edge-Key"] = self.api_key
-        return h
+        return {"Content-Type": "application/json"}
 
     # ------------------------------------------------------------------
     # REST Endpoints
@@ -77,6 +85,7 @@ class DashboardAPIClient:
         """GET /api/sections"""
         try:
             resp = requests.get(f"{self.base_url}/api/sections", headers=self._headers(), timeout=5)
+            self._record_access_status(resp.status_code)
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
@@ -98,6 +107,10 @@ class DashboardAPIClient:
                     headers=self._headers(),
                     timeout=(5, 15),
                 )
+                self._record_access_status(resp.status_code)
+                if resp.status_code in (401, 403):
+                    print("[APIClient] Camera access denied; deploy the dashboard update that allows camera connections without a key.")
+                    return None
                 resp.raise_for_status()
                 return resp.json()
             except Exception as e:
@@ -116,6 +129,7 @@ class DashboardAPIClient:
         """Distinguish an idle dashboard from a failed request."""
         try:
             resp = requests.get(f"{self.base_url}/api/sessions/active", params={"section_id": self.section_id} if self.section_id else {}, headers=self._headers(), timeout=5)
+            self._record_access_status(resp.status_code)
             if resp.status_code == 200:
                 data = resp.json()
                 self._session_id = data.get("id") if data else None
@@ -124,6 +138,20 @@ class DashboardAPIClient:
         except Exception as e:
             print(f"[APIClient] Failed to fetch active session: {e}")
         return False, None
+
+    def fetch_camera_settings(self) -> Optional[dict]:
+        """Recover the selected classroom's controls after missed socket messages."""
+        try:
+            response = requests.get(
+                f"{self.base_url}/api/camera/settings",
+                params={"section_id": self.section_id} if self.section_id else {},
+                headers=self._headers(), timeout=5,
+            )
+            response.raise_for_status()
+            return response.json().get("settings")
+        except requests.RequestException as error:
+            print(f"[APIClient] Failed to fetch camera settings: {error}")
+            return None
 
     def post_event(self, event_payload: dict) -> bool:
         """POST /api/events/ingest — send a gesture event to the dashboard."""
@@ -196,9 +224,10 @@ class DashboardAPIClient:
             return False
 
     def check_connection(self) -> bool:
-        """Quick health check against the dashboard."""
+        """Check camera access to the roster, rather than public server health."""
         try:
-            resp = requests.get(f"{self.base_url}/api/edge/status", headers=self._headers(), timeout=3)
+            resp = requests.get(f"{self.base_url}/api/sections", headers=self._headers(), timeout=5)
+            self._record_access_status(resp.status_code)
             self._http_connected = resp.status_code == 200
             return self._http_connected
         except Exception:
@@ -235,11 +264,11 @@ class DashboardAPIClient:
         while self._ws_running:
             try:
                 ws = websocket.WebSocket()
-                ws_headers = {"X-Edge-Key": self.api_key} if self.api_key else {}
-                ws.connect(ws_url + ("?section_id=" + quote(self.section_id, safe="") if self.section_id else ""), timeout=5, header=ws_headers)
+                ws.connect(ws_url + ("?section_id=" + quote(self.section_id, safe="") if self.section_id else ""), timeout=5)
                 with self._ws_lock:
                     self._ws = ws
                 self._ws_connected = True
+                self._access_denied = False
                 backoff_sec = 3.0  # reset backoff on success
                 print(f"[APIClient] Connected to dashboard WebSocket: {ws_url}")
 
@@ -248,7 +277,7 @@ class DashboardAPIClient:
                         ws.settimeout(5.0)
                         data = ws.recv()
                         if not data:
-                            continue
+                            break
                         if data in ("pong", "ping"):
                             continue
                         try:

@@ -22,7 +22,7 @@ def test_sender_retries_in_order(monkeypatch):
 
     monkeypatch.setattr("api_client.requests.post", post)
     monkeypatch.setattr("api_client.time.sleep", lambda _: None)
-    client = DashboardAPIClient(api_key="key")
+    client = DashboardAPIClient()
     assert client.send_event({"event_id": "first"})
     assert client.send_event({"event_id": "second"})
     deadline = time.monotonic() + 2

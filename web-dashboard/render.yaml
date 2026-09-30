@@ -10,7 +10,5 @@ services:
         sync: false
       - key: DATABASE_PATH
         value: hand_tracking.db
-      - key: EDGE_API_KEY
-        generateValue: true
       - key: AUTH_SECRET
         generateValue: true

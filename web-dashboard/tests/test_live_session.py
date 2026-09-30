@@ -20,7 +20,6 @@ from backend.database import DatabaseManager, SCHEMA_SQL  # noqa: E402
 def live_class(tmp_path, monkeypatch):
     database = DatabaseManager(str(tmp_path / "classtrack-test.db"))
     monkeypatch.setattr(dashboard, "db", database)
-    monkeypatch.setattr(dashboard, "EDGE_API_KEY", "test-edge-key")
     dashboard.edge_selected_section_id = None
     dashboard.queues.clear()
     teacher = database.create_teacher("Test teacher", "", "TEACHER", "Test-password-2026", account_id="teacher_master")

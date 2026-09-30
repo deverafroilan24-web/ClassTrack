@@ -2,7 +2,7 @@
 ; Inno Setup 6 Script
 
 #define MyAppName "ClassTrack Camera Node"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "ClassTrack"
 #define MyAppExeName "ClassTrack.exe"
 

@@ -18,14 +18,9 @@ if not exist "%PYTHON_EXE%" (
     exit /b 1
 )
 
-:: Private runtime configuration is included in the installer, never in the source ZIP.
+:: Runtime configuration is included in the installer, never in the source ZIP.
 if not exist "desktop-app\.env" (
-    echo [ERROR] desktop-app\.env is missing. Add the private Render EDGE_API_KEY before building.
-    exit /b 1
-)
-findstr /R /C:"^[ ]*EDGE_API_KEY=." "desktop-app\.env" >nul
-if errorlevel 1 (
-    echo [ERROR] EDGE_API_KEY is empty in desktop-app\.env. The installer cannot authenticate with Render.
+    echo [ERROR] desktop-app\.env is missing. Configure the dashboard URL before building.
     exit /b 1
 )
 :: 2. Ensure PyInstaller is installed

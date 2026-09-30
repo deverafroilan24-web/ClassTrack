@@ -41,13 +41,13 @@ HandTracking - Desktop and Web/
 
 Teachers now sign in with their **Teacher ID and password** at `/login`. Administrator access is at `/admin` (also available from the welcome screen). There are no default accounts or shared PINs.
 
-For production, manage administrators directly in **Supabase Table Editor → Admin**; see [Supabase admin setup](web-dashboard/SUPABASE_ADMIN.md). For local development, from `web-dashboard`, run `python manage_admin.py` to create or reset the administrator. The command reads the same `.env` as the server and prompts for an ID, email address and password without echoing the password. Sign in at `/admin` to add teachers, edit IDs/names/departments, reset passwords, enable/disable accounts, or delete sign-in access. Deleting access ends the active session and retains class history. Teacher passwords require 12–128 characters and use salted PBKDF2-SHA256 hashes (600,000 iterations). Admin passwords entered through Supabase use salted bcrypt hashes; see the admin setup guide for length limits. Password/credential changes revoke previous sign-ins.
+From `web-dashboard`, run `python manage_admin.py` to create or reset the administrator. The command reads the same `.env` as the server and prompts for an ID and password without echoing the password. Sign in at `/admin` to add teachers, edit IDs/names/departments, reset passwords, enable/disable accounts, or delete sign-in access. Deleting access ends the active session and retains class history. Passwords require 12–128 characters and are stored only as salted PBKDF2-SHA256 hashes (600,000 iterations). Password/credential changes revoke previous sign-ins.
 
 **Upgrade:** the migration preserves existing account IDs, section ownership and student records, clears publicly exposed PINs, and disables the old key login endpoints. Existing teachers must receive a new ID/password through the administrator panel. Historical duplicate enrollments are preserved for review; new duplicate student IDs (ignoring case and surrounding whitespace) are rejected within each section, including concurrent submissions. Different students may share a name, and the same student ID may appear in different sections.
 
-Set a long random `AUTH_SECRET` in the dashboard environment. Set `EDGE_API_KEY` to the same private value in the dashboard and `desktop-app/.env`; camera access is rejected when this key is unset. Use HTTPS for hosted access. Password hashing protects credentials; student records and uploaded images are **not application-encrypted at rest**. Protect the database/files with your hosting or disk encryption and restrict backup access.
+Set a long random `AUTH_SECRET` in the dashboard environment. Camera connections do not require an API key: roster/session reads, camera controls, calibration geometry and event ingestion are open to camera nodes. Teacher account management, classroom edits and participation awards require teacher authentication. Use HTTPS for hosted access. Password hashing protects credentials; student records and uploaded images are **not application-encrypted at rest**. Protect the database/files with your hosting or disk encryption and restrict backup access.
 
-Each teacher can run one live session independently of other teachers. Each class has its own queue and guest viewing code; ending another teacher's session does not affect it. Guests see only the session for their code, which expires when that session ends. For simultaneous classrooms, run a camera node per classroom and pass `--section-id SECTION_ID` (or select the section in the desktop app). A camera follows its selected section; it never switches to another teacher's class automatically. An unbound camera may auto-select only when there is one section.
+Each teacher can run one live session independently of other teachers. Each class has its own queue and guest viewing code; ending another teacher's session does not affect it. Guests see only the session for their code, which expires when that session ends. For simultaneous classrooms, run a camera node per classroom and pass `--section-id SECTION_ID` (or select the section in the desktop app). A camera follows its selected section; it never switches to another teacher's class automatically. An unbound camera follows the only running session, or auto-selects a section when only one exists. Only the first confirmed student in the raise queue turns green; waiting students stay blue.
 
 Double-click **`START_ALL.bat`**. This starts:
 1. **Web Dashboard** at `http://127.0.0.1:8000` (browser opens automatically).
@@ -123,7 +123,7 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Open `desktop-app/.env` and set `EDGE_API_KEY` to the same private value used in `web-dashboard/.env`. Set `WEB_DASHBOARD_URL=http://127.0.0.1:8000`. Then run:
+Open `desktop-app/.env` and set `WEB_DASHBOARD_URL=http://127.0.0.1:8000` for a local dashboard, or the hosted dashboard URL for Render. No camera key is needed. Then run:
 
 ```powershell
 python launch_desktop.py --url http://127.0.0.1:8000

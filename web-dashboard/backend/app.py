@@ -62,7 +62,6 @@ def session_queue(session_id):
     return queues.setdefault(session_id, PodiumQueueManager())
 
 # Server secrets. A generated auth secret invalidates tokens after a restart.
-EDGE_API_KEY = os.getenv("EDGE_API_KEY", "")
 AUTH_SECRET = (os.getenv("AUTH_SECRET") or secrets.token_urlsafe(32)).encode()
 TOKEN_LIFETIME_SECONDS = 8 * 60 * 60
 login_attempts: Dict[str, tuple[int, float]] = {}
@@ -333,11 +332,6 @@ def _guest_session(token: Optional[str]) -> Optional[dict]:
     return None
 
 
-def _teacher_or_edge(request: Request) -> bool:
-    return (_valid_teacher_token(request.headers.get("x-teacher-token"))
-            or _validate_edge_key(request.headers.get("x-edge-key", "")))
-
-
 def _guest_safe(value):
     """Remove private student fields from every public REST/WS payload."""
     hidden = {"student_id_number", "student_id", "photo_path", "face_embedding", "students", "guest_code",
@@ -353,9 +347,9 @@ def _guest_safe(value):
 async def enforce_teacher_access(request: Request, call_next):
     path = request.url.path
     method = request.method
-    if path.startswith("/uploads/") and not _teacher_or_edge(request):
+    if path.startswith("/uploads/") and not _valid_teacher_token(request.headers.get("x-teacher-token")):
         return JSONResponse({"detail": "Teacher authentication required"}, status_code=401)
-    if path.startswith('/uploads/') and not _validate_edge_key(request.headers.get('x-edge-key', '')):
+    if path.startswith('/uploads/'):
         teacher_id = _teacher_id_from_token(request.headers.get('x-teacher-token'))
         with db._connect() as conn:
             photo = conn.execute("SELECT section_id FROM students WHERE photo_path = ?", (path,)).fetchone()
@@ -363,16 +357,16 @@ async def enforce_teacher_access(request: Request, call_next):
             return JSONResponse({'detail': 'Photo not found'}, status_code=404)
     if path.startswith("/api/"):
         token = request.headers.get("x-teacher-token")
+        if token and not _valid_teacher_token(token) and path not in {"/api/auth/login", "/api/auth/session"}:
+            return JSONResponse({"detail": "Teacher authentication required"}, status_code=401)
         account = _decode_token(token) or {}
         if account.get("is_admin") and _valid_teacher_token(token):
             if not (path.startswith("/api/admin/teachers") or path in ("/api/auth/session", "/api/auth/login")):
                 return JSONResponse({"detail": "Administrator access is limited to teacher accounts"}, status_code=403)
         guest_get = {"/api/sections", "/api/sessions/active", "/api/recitation/ledger"}
-        public_get = {"/api/edge/status", "/api/auth/guest-session"}
+        public_get = {"/api/edge/status", "/api/auth/guest-session", "/api/sections",
+                      "/api/seats", "/api/sessions/active", "/api/camera/settings"}
         public_post = {"/api/auth/login", "/api/auth/guest", "/api/events/ingest"}
-        if method == "POST" and path == "/api/events/ingest":
-            if not _validate_edge_key(request.headers.get("x-edge-key", "")):
-                return JSONResponse({"detail": "Invalid or missing X-Edge-Key"}, status_code=401)
         if method == "GET" and path in public_get:
             pass
         elif path.startswith("/api/admin/teachers"):
@@ -383,16 +377,13 @@ async def enforce_teacher_access(request: Request, call_next):
         elif method == "GET" and path in guest_get and (
             _valid_teacher_token(request.headers.get("x-teacher-token"))
             or _guest_session(request.headers.get("x-guest-token"))
-            or _teacher_or_edge(request)
         ):
-            pass
-        elif method == "GET" and path == "/api/seats" and _teacher_or_edge(request):
             pass
         elif method == "GET" and path == "/api/auth/session":
             pass
         elif method == "POST" and path in public_post:
             pass
-        elif method == "PUT" and path == "/api/seats" and _teacher_or_edge(request):
+        elif method == "PUT" and path == "/api/seats":
             pass
         elif not _valid_teacher_token(request.headers.get("x-teacher-token")):
             return JSONResponse({"detail": "Teacher authentication required"}, status_code=401)
@@ -545,34 +536,20 @@ async def get_guest_auth_session(x_guest_token: Optional[str] = Header(default=N
     return {"authenticated": True, "section_id": active["section_id"]}
 
 
-def _validate_edge_key(provided_key: str) -> bool:
-    if not EDGE_API_KEY:
-        return False
-    return secrets.compare_digest(provided_key or "", EDGE_API_KEY)
-
-
-def _require_edge_auth(x_edge_key: Optional[str] = None) -> None:
-    if not _validate_edge_key(x_edge_key or ""):
-        raise HTTPException(status_code=401, detail="Invalid or missing X-Edge-Key")
-
-
 # ---------------------------------------------------------------------------
 # REST API ENDPOINTS
 # ---------------------------------------------------------------------------
 
 @app.get("/api/sections", response_model=List[SectionResponse])
 async def get_sections(x_teacher_token: Optional[str] = Header(default=None),
-                       x_guest_token: Optional[str] = Header(default=None),
-                       x_edge_key: Optional[str] = Header(default=None)):
+                       x_guest_token: Optional[str] = Header(default=None)):
     teacher_payload = _decode_token(x_teacher_token) if _valid_teacher_token(x_teacher_token) else None
     if teacher_payload and teacher_payload.get("role") == "teacher":
         return db.get_sections(teacher_id=teacher_payload.get("teacher_id"))
-    if x_edge_key and _validate_edge_key(x_edge_key):
-        return db.get_sections()
     active = _guest_session(x_guest_token)
     if active and active.get("section_id"):
         return [section for section in db.get_sections() if section["id"] == active["section_id"]]
-    return []
+    return db.get_sections()
 
 
 @app.post("/api/edge/section")
@@ -682,7 +659,7 @@ async def enroll_student(section_id: str, body: StudentEnrollRequest, x_teacher_
 
 @app.delete("/api/students/{student_id}")
 async def delete_student(student_id: str, section_id: Optional[str] = None,
-                         x_teacher_token: Optional[str] = Header(default=None), x_edge_key: Optional[str] = Header(default=None)):
+                         x_teacher_token: Optional[str] = Header(default=None)):
     if not section_id:
         raise HTTPException(status_code=400, detail="section_id is required")
     _enforce_owned_section(section_id, x_teacher_token)
@@ -980,6 +957,13 @@ async def start_session(body: SessionStartRequest, x_teacher_token: Optional[str
     if current_session:
         raise HTTPException(status_code=409, detail="End your current class session before starting another")
     sess = db.start_session(title=body.title, section_id=body.section_id)
+    # An unbound camera can follow a single running classroom without a key or
+    # manual section selection. Bound cameras never switch to another class.
+    live_sessions = [s for s in db.get_sessions() if not s.get("ended_at")]
+    if len(live_sessions) == 1:
+        for ws in edge_subscribers:
+            if not edge_sections.get(ws):
+                edge_sections[ws] = body.section_id
     # Clear podium queue for fresh session
     session_queue(sess["id"]).clear()
     ledger = db.get_recitation_ledger(session_id=sess["id"], section_id=body.section_id, active_session_required=True)
@@ -1008,23 +992,21 @@ async def stop_session(x_teacher_token: Optional[str] = Header(default=None)):
 
 @app.get("/api/seats", response_model=List[SeatSchema])
 async def get_seats(section_id: Optional[str] = None,
-                    x_teacher_token: Optional[str] = Header(default=None),
-                    x_edge_key: Optional[str] = Header(default=None)):
+                    x_teacher_token: Optional[str] = Header(default=None)):
     teacher_id = _teacher_id_from_token(x_teacher_token) if _valid_teacher_token(x_teacher_token) else None
     # Prefer teacher ownership scope when both credential types are supplied.
     if teacher_id:
         return db.get_seats(section_id=section_id, teacher_id=teacher_id)
-    if _validate_edge_key(x_edge_key or ""):
-        return db.get_seats(section_id=section_id) if section_id else []
-    return []
+    return db.get_seats(section_id=section_id) if section_id else []
 
 
 @app.put("/api/seats", response_model=List[SeatSchema])
 async def update_seats(body: SeatBulkUpdateRequest, section_id: Optional[str] = None,
-                       x_teacher_token: Optional[str] = Header(default=None), x_edge_key: Optional[str] = Header(default=None)):
+                       x_teacher_token: Optional[str] = Header(default=None)):
     if not section_id:
         raise HTTPException(status_code=400, detail="section_id is required")
-    if not _validate_edge_key(x_edge_key or ''):
+    is_camera = not _valid_teacher_token(x_teacher_token)
+    if not is_camera:
         _enforce_owned_section(section_id, x_teacher_token)
     existing = {seat['id']: seat for seat in db.get_seats(section_id=section_id)}
     roster = {student['id']: student for student in db.get_students(section_id)}
@@ -1038,7 +1020,7 @@ async def update_seats(body: SeatBulkUpdateRequest, section_id: Optional[str] = 
             raise HTTPException(status_code=404, detail='Desk not found in this section')
         if seat.student_id and seat.student_id not in roster:
             raise HTTPException(status_code=404, detail='Student not found in this section')
-        if _validate_edge_key(x_edge_key or ''):
+        if is_camera:
             previous = existing.get(seat.id)
             if not previous or any(getattr(seat, key) != previous.get(key) for key in ('student_id', 'student_name', 'student_id_number', 'is_present')):
                 raise HTTPException(status_code=403, detail='Camera calibration can only update existing desk geometry')
@@ -1232,14 +1214,12 @@ async def export_class_csv(section_id: Optional[str] = None,
 # ---------------------------------------------------------------------------
 
 @app.post("/api/events/ingest")
-async def ingest_edge_event(body: EdgeEventIngest, x_edge_key: Optional[str] = Header(default=None)):
+async def ingest_edge_event(body: EdgeEventIngest):
     """
     Receive gesture events from remote Camera Nodes.
     This is the primary integration point between camera-node and web-dashboard.
-    Requires X-Edge-Key header when EDGE_API_KEY is configured.
+    Camera connections do not require a shared key.
     """
-    _require_edge_auth(x_edge_key)
-
     active = db.get_active_session(section_id=body.section_id)
     if not active:
         raise HTTPException(status_code=409, detail="No active session — start a session first")
@@ -1336,8 +1316,10 @@ AVAILABLE_MODELS = [
 
 
 @app.get("/api/camera/settings")
-async def get_camera_settings(x_teacher_token: Optional[str] = Header(default=None)):
+async def get_camera_settings(x_teacher_token: Optional[str] = Header(default=None), section_id: Optional[str] = None):
     teacher_id = _teacher_id_from_token(x_teacher_token)
+    if not teacher_id and section_id:
+        teacher_id = db.get_section_owner(section_id)
     return {'settings': teacher_camera_settings.get(teacher_id, camera_settings), 'available_models': AVAILABLE_MODELS,
             'connected_nodes': sum(db.get_section_owner(sec) == teacher_id for sec in edge_sections.values())}
 
@@ -1374,6 +1356,8 @@ async def get_edge_status(x_teacher_token: Optional[str] = Header(default=None))
     teacher_id = _teacher_id_from_token(x_teacher_token) if _valid_teacher_token(x_teacher_token) else None
     active = db.get_active_session(teacher_id=teacher_id) if teacher_id else None
     return {
+        "camera_protocol": "keyless-v1",
+        "camera_key_required": False,
         "connected_nodes": sum(db.get_section_owner(sec) == teacher_id for sec in edge_sections.values()) if teacher_id else len(edge_subscribers),
         "podium_active": len(session_queue(active['id']).get_podium()) if active else (0 if teacher_id else sum(len(q.get_podium()) for q in queues.values())),
         "camera_settings": camera_settings,
@@ -1455,13 +1439,17 @@ async def ws_edge(websocket: WebSocket):
     - Stream gesture events in real-time
     - Get seat configuration updates
     """
-    if not _validate_edge_key(websocket.headers.get("x-edge-key", "")):
-        await websocket.close(code=1008)
-        return
     await websocket.accept()
     edge_subscribers.add(websocket)
     selected = websocket.query_params.get("section_id")
     sections = db.get_sections()
+    if selected and not any(section['id'] == selected for section in sections):
+        edge_subscribers.discard(websocket)
+        await websocket.close(code=1008)
+        return
+    live_sessions = [s for s in db.get_sessions() if not s.get("ended_at")]
+    if not selected and len(live_sessions) == 1:
+        selected = live_sessions[0]['section_id']
     if not selected and len(sections) == 1:
         selected = sections[0]["id"]
     edge_sections[websocket] = selected
@@ -1498,7 +1486,7 @@ async def ws_edge(websocket: WebSocket):
                     try:
                         if edge_sections.get(websocket) != body.section_id:
                             raise HTTPException(status_code=403, detail="Select this section on the camera before sending events")
-                        result = await ingest_edge_event(body, x_edge_key=websocket.headers.get("x-edge-key"))
+                        result = await ingest_edge_event(body)
                         await websocket.send_text(json.dumps({"type": "EVENT_ACK", **result}))
                     except HTTPException as error:
                         await websocket.send_text(json.dumps({

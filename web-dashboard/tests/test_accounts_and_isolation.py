@@ -13,7 +13,6 @@ PASSWORD = 'Teacher-test-password-2026'
 def school(tmp_path, monkeypatch):
     database = DatabaseManager(str(tmp_path / 'school.db'))
     monkeypatch.setattr(dashboard, 'db', database)
-    monkeypatch.setattr(dashboard, 'EDGE_API_KEY', 'edge-test')
     dashboard.queues.clear()
     dashboard.login_attempts.clear()
     dashboard.teacher_camera_settings.clear()
@@ -259,7 +258,7 @@ def test_two_live_classes_queue_guest_and_camera_isolation(school):
         assert client.get('/api/auth/guest-session', headers=guest_headers[1]).status_code == 200
 
 
-def test_cross_section_seat_write_and_camera_auth(school, monkeypatch):
+def test_cross_section_seat_write_and_camera_access(school):
     client, db, admin, one, two = school
     a, b = section(client, one), section(client, two)
     foreign = db.register_student(b['id'], 'Student B', 'B-1')
@@ -267,8 +266,7 @@ def test_cross_section_seat_write_and_camera_auth(school, monkeypatch):
     assert client.put('/api/seats?section_id=' + a['id'], headers=one, json={'seats': [foreign]}).status_code == 404
     assert client.post('/api/camera/settings', headers=one, json={'model_name': '../../bad.pt'}).status_code == 422
     assert client.get('/api/analytics/grades?section_id=' + a['id'] + '&target=0', headers=one).status_code == 422
-    monkeypatch.setattr(dashboard, 'EDGE_API_KEY', '')
-    assert client.get('/api/seats?section_id=' + b['id']).status_code == 401
+    assert client.get('/api/seats?section_id=' + b['id']).status_code == 200
 
 
 def test_migration_retires_plaintext_pin_preserving_records(tmp_path):

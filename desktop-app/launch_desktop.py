@@ -41,13 +41,13 @@ import cv2
 import numpy as np
 
 from config import (
+    APP_VERSION,
     WEB_DASHBOARD_URL,
     SECTION_ID,
     VIDEO_SOURCE,
     YOLO_MODEL,
     DETECTION_CONFIDENCE,
     TARGET_FPS,
-    EDGE_API_KEY,
     resolve_model_path,
 )
 from api_client import DashboardAPIClient
@@ -66,7 +66,6 @@ class CameraNodeApp:
     def __init__(
         self,
         dashboard_url: str,
-        api_key: str = "",
         video_source: str = "0",
         model_path: str = "yolo11s-pose.pt",
         confidence: float = 0.50,
@@ -88,7 +87,6 @@ class CameraNodeApp:
         # API Client for dashboard communication
         self.api_client = DashboardAPIClient(
             base_url=dashboard_url,
-            api_key=api_key,
             section_id=section_id,
             on_session_command=self._on_session_command,
         )
@@ -198,7 +196,6 @@ class CameraNodeApp:
             if section_id:
                 self.section_id = section_id
             self._match_section_index()
-            self.api_client.session_id = session_id
             if changed or not session_id:
                 self.vision_worker.set_session_id(None)
                 if section_changed:
@@ -206,6 +203,7 @@ class CameraNodeApp:
             selected = self.section_id
             if hasattr(self.api_client, "select_section"):
                 self.api_client.select_section(selected)
+            self.api_client.session_id = session_id
         if session_id:
             print(f"[CameraNode] Active session: {session_id} (Section: {selected})")
             if changed:
@@ -234,6 +232,8 @@ class CameraNodeApp:
 
     def _on_vision_event(self, event: GestureEventPayload):
         """Called when the vision worker detects a gesture event."""
+        if self.api_client.access_denied:
+            return
         with self._section_lock:
             session_id = self.vision_worker.session_id
             if not session_id or session_id != self._active_session_id:
@@ -344,6 +344,9 @@ class CameraNodeApp:
                 self.vision_worker.set_seats(zones)
                 self.vision_worker.set_session_id(active_session_id)
             print(f"[CameraNode] Loaded {len(zones)} seat zone(s) for section {section_id}")
+            settings = self.api_client.fetch_camera_settings()
+            if settings and section_id == self.section_id:
+                self._apply_camera_settings(settings)
         except Exception as e:
             print(f"[CameraNode] Could not load seats: {e}")
 
@@ -372,8 +375,8 @@ class CameraNodeApp:
         try:
             if self.api_client.check_connection():
                 print("[CameraNode] Dashboard connection OK")
-                active = self.api_client.fetch_active_session()
-                if active:
+                ok, active = self.api_client.fetch_active_session_result()
+                if ok:
                     self._set_active_session(active)
                 self._load_sections()
                 self._load_seats()
@@ -403,8 +406,9 @@ class CameraNodeApp:
             try:
                 if action == "RELOAD_ALL":
                     print("[CameraNode] Refreshing dashboard data...")
-                    active = self.api_client.fetch_active_session()
-                    self._set_active_session(active)
+                    ok, active = self.api_client.fetch_active_session_result()
+                    if ok:
+                        self._set_active_session(active)
                     self._load_sections()
                     self._load_seats()
                 elif action in ("RELOAD_SEATS", "CYCLE"):
@@ -414,8 +418,9 @@ class CameraNodeApp:
                     if not self.api_client.is_connected:
                         if self.api_client.check_connection():
                             print("[CameraNode] Dashboard connected! Syncing...")
-                            active = self.api_client.fetch_active_session()
-                            self._set_active_session(active)
+                            ok, active = self.api_client.fetch_active_session_result()
+                            if ok:
+                                self._set_active_session(active)
                             self._load_sections()
                             self._load_seats()
                             poll_interval = 8.0
@@ -430,6 +435,8 @@ class CameraNodeApp:
                             if not self.sections:
                                 self._load_sections()
                             self._load_seats()
+                if self.api_client.access_denied and self.vision_worker.session_id:
+                    self.vision_worker.set_session_id(None)
             except Exception as e:
                 print(f"[CameraNode] Background sync error: {e}")
                 time.sleep(1.0)
@@ -508,11 +515,20 @@ class CameraNodeApp:
         with self._section_lock:
             sec_name = self._section_name()
         hud_text = f"{status_txt}  [{sec_name}]" if sec_name else status_txt
+        if self.api_client.access_denied:
+            hud_text = "Camera access denied - update the deployed dashboard"
+        elif connected and not self.section_id:
+            hud_text = "No class selected - press C to select your section"
+        elif connected and not self.vision_worker.seats:
+            hud_text = f"{sec_name} - loading student roster"
+        elif connected and self._active_session_id and not self.vision_worker.session_id:
+            hud_text = f"{sec_name} - syncing active session"
         cv2.putText(frame, hud_text, (28, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (240, 240, 240), 1, cv2.LINE_AA)
 
 
 def main():
     parser = argparse.ArgumentParser(description="ClassTrack Camera Node — Desktop Vision App")
+    parser.add_argument("--version", action="version", version=f"ClassTrack Camera Node {APP_VERSION}")
     parser.add_argument("--url", type=str, default=WEB_DASHBOARD_URL, help="Web Dashboard URL")
     parser.add_argument("--cam", type=str, default=VIDEO_SOURCE, help="Camera index or video file path")
     parser.add_argument("--model", type=str, default=YOLO_MODEL, help="YOLO model name")
@@ -520,10 +536,8 @@ def main():
     parser.add_argument("--confidence", type=float, default=DETECTION_CONFIDENCE, help="Detection confidence")
     args = parser.parse_args()
 
-    api_key = EDGE_API_KEY.strip()
-
     print("============================================================")
-    print("  ClassTrack Camera Node (Desktop Vision App)               ")
+    print(f"  ClassTrack Camera Node {APP_VERSION} (Desktop Vision App)")
     print(f"  Dashboard URL: {args.url}                                ")
     print(f"  Camera Source: {args.cam}                                ")
     print(f"  YOLO Model:    {args.model}                              ")
@@ -536,7 +550,6 @@ def main():
 
     app = CameraNodeApp(
         dashboard_url=args.url,
-        api_key=api_key,
         video_source=args.cam,
         model_path=resolved_model,
         confidence=args.confidence,
