@@ -41,13 +41,13 @@ import cv2
 import numpy as np
 
 from config import (
+    APP_VERSION,
     WEB_DASHBOARD_URL,
     SECTION_ID,
     VIDEO_SOURCE,
     YOLO_MODEL,
     DETECTION_CONFIDENCE,
     TARGET_FPS,
-    EDGE_API_KEY,
     resolve_model_path,
 )
 from api_client import DashboardAPIClient
@@ -66,11 +66,11 @@ class CameraNodeApp:
     def __init__(
         self,
         dashboard_url: str,
-        api_key: str = "",
         video_source: str = "0",
         model_path: str = "yolo11s-pose.pt",
         confidence: float = 0.50,
         section_id: str = "",
+        follow_dashboard: Optional[bool] = None,
     ):
         self.dashboard_url = dashboard_url
         self.section_id = section_id
@@ -88,7 +88,8 @@ class CameraNodeApp:
         # API Client for dashboard communication
         self.api_client = DashboardAPIClient(
             base_url=dashboard_url,
-            api_key=api_key,
+            section_id=section_id,
+            follow_dashboard=follow_dashboard,
             on_session_command=self._on_session_command,
         )
 
@@ -122,17 +123,23 @@ class CameraNodeApp:
             selected_section_id = msg.get("selected_section_id")
             incoming = msg.get("sections", [])
             with self._section_lock:
-                if incoming:
+                if 'selected_section_id' in msg and (selected_section_id or '') != self.section_id:
+                    # Invalidate the old class before changing the HUD/session.
+                    self.vision_worker.set_session_id(None)
+                    self.vision_worker.set_seats([])
+                    self._active_session_id = None
+                    self.section_id = selected_section_id or ''
+                if 'sections' in msg:
                     self.sections = incoming
-                    self._match_section_index()
+                self._match_section_index()
                 sec_name = self._section_name()
             if incoming:
                 print(f"[CameraNode] Synced {len(self.sections)} section(s) via WebSocket. Active: {sec_name}")
             self._set_active_session(active)
-            if not active and selected_section_id:
+            self.api_client.select_section(self.section_id)
+            if not active:
                 self._set_camera_section(selected_section_id)
-            if incoming:
-                self._trigger_sync("RELOAD_SEATS")
+            self._trigger_sync("RELOAD_SEATS")
             # Apply initial camera settings if present
             c_settings = msg.get("camera_settings")
             if c_settings:
@@ -154,8 +161,7 @@ class CameraNodeApp:
 
     def _set_camera_section(self, section_id: Optional[str]):
         """Load the teacher's roster as soon as they sign in, before a session starts."""
-        if not section_id:
-            return
+        section_id = section_id or ''
         with self._section_lock:
             if self._active_session_id and section_id != self.section_id:
                 return
@@ -163,6 +169,8 @@ class CameraNodeApp:
             self.section_id = section_id
             self._match_section_index()
             selected = self.section_id
+            if hasattr(self.api_client, "select_section"):
+                self.api_client.select_section(selected)
             if changed:
                 self.vision_worker.set_session_id(None)
                 self.vision_worker.set_seats([])
@@ -179,7 +187,7 @@ class CameraNodeApp:
             if section.get("id") == self.section_id:
                 self.current_section_idx = i
                 return
-        if self.sections and not self._active_session_id:
+        if len(self.sections) == 1 and not self._active_session_id:
             self.current_section_idx = 0
             self.section_id = self.sections[0]["id"]
 
@@ -194,12 +202,14 @@ class CameraNodeApp:
             if section_id:
                 self.section_id = section_id
             self._match_section_index()
-            self.api_client.session_id = session_id
             if changed or not session_id:
                 self.vision_worker.set_session_id(None)
                 if section_changed:
                     self.vision_worker.set_seats([])
             selected = self.section_id
+            if hasattr(self.api_client, "select_section"):
+                self.api_client.select_section(selected)
+            self.api_client.session_id = session_id
         if session_id:
             print(f"[CameraNode] Active session: {session_id} (Section: {selected})")
             if changed:
@@ -228,9 +238,11 @@ class CameraNodeApp:
 
     def _on_vision_event(self, event: GestureEventPayload):
         """Called when the vision worker detects a gesture event."""
+        if self.api_client.access_denied:
+            return
         with self._section_lock:
             session_id = self.vision_worker.session_id
-            if not session_id or session_id != self._active_session_id:
+            if not session_id or session_id != self._active_session_id or event.session_id != session_id:
                 return
             section_id = self.section_id
             student_id = next((seat.student_id for seat in self.vision_worker.seats
@@ -252,6 +264,8 @@ class CameraNodeApp:
             "delta_ms": event.delta_ms,
             "session_id": session_id,
             "earned_point": event.earned_point,
+            "verification_status": event.verification_status,
+            "face_similarity": event.face_similarity,
         }
 
         # Queue a confirmed HTTP event without blocking the camera frame loop.
@@ -292,6 +306,8 @@ class CameraNodeApp:
         try:
             with self._section_lock:
                 section_id = self.section_id
+                requested_session_id = self._active_session_id
+                context_counter = getattr(self.api_client, '_context_update_counter', 0)
             if not section_id:
                 return
             seats_data = self.api_client.fetch_seats(section_id)
@@ -303,7 +319,8 @@ class CameraNodeApp:
             # response or a section roster that is still loading.
             with self._section_lock:
                 active_session_id = self._active_session_id
-                if section_id != self.section_id:
+                if (section_id != self.section_id or requested_session_id != self._active_session_id
+                        or context_counter != getattr(self.api_client, '_context_update_counter', 0)):
                     self._trigger_sync("RELOAD_SEATS")
                     return
                 if active_session_id and not seats_data:
@@ -332,12 +349,16 @@ class CameraNodeApp:
                 for s in seats_data
             ]
             with self._section_lock:
-                if section_id != self.section_id:
+                if (section_id != self.section_id or requested_session_id != self._active_session_id
+                        or context_counter != getattr(self.api_client, '_context_update_counter', 0)):
                     self._trigger_sync("RELOAD_SEATS")
                     return
                 self.vision_worker.set_seats(zones)
                 self.vision_worker.set_session_id(active_session_id)
             print(f"[CameraNode] Loaded {len(zones)} seat zone(s) for section {section_id}")
+            settings = self.api_client.fetch_camera_settings()
+            if settings and section_id == self.section_id:
+                self._apply_camera_settings(settings)
         except Exception as e:
             print(f"[CameraNode] Could not load seats: {e}")
 
@@ -351,6 +372,7 @@ class CameraNodeApp:
                 return
             self.current_section_idx = (self.current_section_idx + 1) % len(self.sections)
             self.section_id = self.sections[self.current_section_idx]["id"]
+            self.api_client.select_section(self.section_id, manual=True)
             self.vision_worker.set_seats([])
             sec_name = self._section_name()
         print(f"[CameraNode] Switched to section: {sec_name}")
@@ -363,10 +385,12 @@ class CameraNodeApp:
         """
         # Initial check & load
         try:
-            if self.api_client.check_connection():
+            if self._refresh_camera_context():
+                self._load_seats()
+            elif self.api_client._context_supported is False and self.api_client.check_connection():
                 print("[CameraNode] Dashboard connection OK")
-                active = self.api_client.fetch_active_session()
-                if active:
+                ok, active = self.api_client.fetch_active_session_result()
+                if ok:
                     self._set_active_session(active)
                 self._load_sections()
                 self._load_seats()
@@ -396,20 +420,15 @@ class CameraNodeApp:
             try:
                 if action == "RELOAD_ALL":
                     print("[CameraNode] Refreshing dashboard data...")
-                    active = self.api_client.fetch_active_session()
-                    self._set_active_session(active)
-                    self._load_sections()
+                    self._refresh_camera_context()
                     self._load_seats()
                 elif action in ("RELOAD_SEATS", "CYCLE"):
                     self._load_seats()
                 elif now - last_check_time >= poll_interval:
                     last_check_time = now
                     if not self.api_client.is_connected:
-                        if self.api_client.check_connection():
+                        if self._refresh_camera_context():
                             print("[CameraNode] Dashboard connected! Syncing...")
-                            active = self.api_client.fetch_active_session()
-                            self._set_active_session(active)
-                            self._load_sections()
                             self._load_seats()
                             poll_interval = 8.0
                         else:
@@ -417,15 +436,25 @@ class CameraNodeApp:
                     else:
                         # Reconcile even when the socket still looks connected:
                         # proxies and sleeping services can miss commands.
-                        ok, active = self.api_client.fetch_active_session_result()
-                        if ok:
-                            self._set_active_session(active)
-                            if not self.sections:
-                                self._load_sections()
+                        if self._refresh_camera_context():
                             self._load_seats()
+                if self.api_client.access_denied and self.vision_worker.session_id:
+                    self.vision_worker.set_session_id(None)
             except Exception as e:
                 print(f"[CameraNode] Background sync error: {e}")
                 time.sleep(1.0)
+
+    def _refresh_camera_context(self):
+        ok, _ = self.api_client.fetch_camera_context_result()
+        if ok:
+            return True
+        if self.api_client._context_supported is not False:
+            return False
+        ok, active = self.api_client.fetch_active_session_result()
+        if ok:
+            self._set_active_session(active)
+            self._load_sections()
+        return ok
 
     def run(self):
         """Main loop — OpenCV window with live camera feed and HUD overlay."""
@@ -501,22 +530,33 @@ class CameraNodeApp:
         with self._section_lock:
             sec_name = self._section_name()
         hud_text = f"{status_txt}  [{sec_name}]" if sec_name else status_txt
+        if self.api_client.access_denied:
+            hud_text = "Camera access denied - update the deployed dashboard"
+        elif connected and not self.section_id:
+            hud_text = "No class selected - select your class on the teacher dashboard"
+        elif connected and not self.vision_worker.seats:
+            hud_text = f"{sec_name} - loading student roster"
+        elif connected and self._active_session_id and not self.vision_worker.session_id:
+            hud_text = f"{sec_name} - syncing active session"
         cv2.putText(frame, hud_text, (28, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (240, 240, 240), 1, cv2.LINE_AA)
 
 
 def main():
     parser = argparse.ArgumentParser(description="ClassTrack Camera Node — Desktop Vision App")
+    parser.add_argument("--version", action="version", version=f"ClassTrack Camera Node {APP_VERSION}")
     parser.add_argument("--url", type=str, default=WEB_DASHBOARD_URL, help="Web Dashboard URL")
     parser.add_argument("--cam", type=str, default=VIDEO_SOURCE, help="Camera index or video file path")
     parser.add_argument("--model", type=str, default=YOLO_MODEL, help="YOLO model name")
-    parser.add_argument("--section", type=str, default=SECTION_ID, help="Section ID to load")
+    parser.add_argument("--section", "--section-id", type=str, default=SECTION_ID, help="Section ID to load")
+    configured_follow = os.getenv('CAMERA_FOLLOW_DASHBOARD', '').lower()
+    parser.add_argument('--follow-dashboard', action=argparse.BooleanOptionalAction,
+                        default=None if not configured_follow else configured_follow in {'1', 'true', 'yes'},
+                        help='Follow the localhost teacher dashboard; explicit section IDs pin a classroom')
     parser.add_argument("--confidence", type=float, default=DETECTION_CONFIDENCE, help="Detection confidence")
     args = parser.parse_args()
 
-    api_key = EDGE_API_KEY.strip()
-
     print("============================================================")
-    print("  ClassTrack Camera Node (Desktop Vision App)               ")
+    print(f"  ClassTrack Camera Node {APP_VERSION} (Desktop Vision App)")
     print(f"  Dashboard URL: {args.url}                                ")
     print(f"  Camera Source: {args.cam}                                ")
     print(f"  YOLO Model:    {args.model}                              ")
@@ -529,11 +569,11 @@ def main():
 
     app = CameraNodeApp(
         dashboard_url=args.url,
-        api_key=api_key,
         video_source=args.cam,
         model_path=resolved_model,
         confidence=args.confidence,
         section_id=args.section,
+        follow_dashboard=args.follow_dashboard,
     )
     app.run()
 

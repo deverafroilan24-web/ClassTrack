@@ -1,11 +1,11 @@
 import cv2
 import numpy as np
-import torch
+import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from ultralytics import YOLO
+from vision_worker.person_tracker import PersonTracker, assign
+from vision_worker.display_state import person_display_state
 
 from vision_worker.kinematics import (
     KinematicEvaluation,
@@ -76,12 +76,13 @@ class PersonDetection:
     centroid: Tuple[float, float]     # xc, yc
     pose: SkeletonPose
     confidence: float
+    track_id: Optional[int] = None
+    evaluation: Optional[KinematicEvaluation] = None
 
 
 class YOLOPoseEngine:
     """
-    Single-pass GPU Pose Estimation and Seat Containment Engine using YOLOv8-Pose.
-    Supports Adaptive Centroid Tracking and Dynamic Person-Anchored Bounding Boxes.
+    Single-pass pose estimation with persistent person IDs and locked seat names.
     """
 
     def __init__(
@@ -92,6 +93,10 @@ class YOLOPoseEngine:
     ):
         self.confidence = confidence
         self.seat_tracks: Dict[str, dict] = {}  # seat_id -> tracking data
+        self.tracker = PersonTracker()
+        from ultralytics import YOLO
+        from ultralytics.cfg import DEFAULT_CFG_DICT
+        import torch
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
@@ -103,25 +108,34 @@ class YOLOPoseEngine:
         except Exception:
             self.device = "cpu"
             self.model.to("cpu")
+        # Support current and older Ultralytics releases without per-frame
+        # deprecation warnings or changing the model's input resolution.
+        cuda = str(self.device).startswith("cuda")
+        self._precision_options = ({"quantize": 16 if cuda else 32}
+                                   if "quantize" in DEFAULT_CFG_DICT else {"half": cuda})
 
     def _is_plausible_person(self, pose: SkeletonPose, bbox: Tuple[int, int, int, int]) -> bool:
         """
         Validates that a detection corresponds to an actual human student rather than
         inanimate background items (hanging jackets, backpacks on hooks, chairs).
         Requires:
-        1. Minimum bounding box dimensions (avoids tiny noise artifacts).
-        2. Detectable human face/nose with confidence >= 0.35.
-        3. Detectable shoulder with confidence >= 0.35.
+        Requires a plausible box, a shoulder and either a visible head landmark
+        or a confident torso. Side views and turned backs can retain their tracks.
         """
         x1, y1, x2, y2 = bbox
         bw = x2 - x1
         bh = y2 - y1
-        if bw < 50 or bh < 70:
+        if bw < 20 or bh < 35:
             return False
 
         # Real students facing camera or in classroom must have detectable head/nose
-        has_head = pose.nose is not None and pose.nose.confidence >= 0.35
-        if not has_head:
+        has_head = any(point is not None and point.confidence >= .35 for point in
+                       (pose.nose, pose.left_eye, pose.right_eye, pose.left_ear, pose.right_ear))
+        has_torso = (pose.left_shoulder is not None and pose.right_shoulder is not None
+                     and pose.left_shoulder.confidence >= .5 and pose.right_shoulder.confidence >= .5
+                     and any(point is not None and point.confidence >= .5
+                             for point in (pose.left_hip, pose.right_hip)))
+        if not has_head and not has_torso:
             return False
 
         # Real students have at least one detectable shoulder
@@ -146,6 +160,8 @@ class YOLOPoseEngine:
             conf=self.confidence,
             device=self.device,
             verbose=False,
+            imgsz=640,
+            **self._precision_options,
         )
 
         detections: List[PersonDetection] = []
@@ -187,6 +203,14 @@ class YOLOPoseEngine:
 
         return detections
 
+    def reset_seat(self, seat_id: str) -> None:
+        self.seat_tracks.pop(seat_id, None)
+        self.tracker.release_seat(seat_id)
+
+    def reset_tracking(self) -> None:
+        self.seat_tracks.clear()
+        self.tracker.reset()
+
     def _extract_pose(self, kpt_array: Optional[np.ndarray], frame_w: int, frame_h: int) -> SkeletonPose:
         """
         Converts YOLO keypoints (17, 2 or 3) into normalized SkeletonPose.
@@ -206,7 +230,7 @@ class YOLOPoseEngine:
             pt = kpt_array[idx]
             px, py = float(pt[0]), float(pt[1])
             conf = float(pt[2]) if len(pt) > 2 else 1.0
-            if conf < 0.30:
+            if conf < 0.25 or (px == 0.0 and py == 0.0):
                 return None
             # Normalized coordinates [0.0, 1.0]
             norm_x = max(0.0, min(1.0, px / frame_w)) if frame_w > 0 else 0.0
@@ -214,6 +238,7 @@ class YOLOPoseEngine:
             return Point2D(x=norm_x, y=norm_y, confidence=conf)
 
         return SkeletonPose(
+            image_aspect_ratio=frame_w / max(1, frame_h),
             nose=make_pt(0),
             left_eye=make_pt(1),
             right_eye=make_pt(2),
@@ -235,131 +260,71 @@ class YOLOPoseEngine:
         seats: List[SeatZone],
         frame_w: int,
         frame_h: int,
+        frame: Optional[np.ndarray] = None,
+        now: Optional[float] = None,
     ) -> Tuple[Dict[str, Tuple[SeatZone, Optional[PersonDetection], KinematicEvaluation]], List[PersonDetection]]:
-        """
-        Matches each seat to a detected person using adaptive containment and tracking.
-        Smooths coordinates with an Exponential Moving Average (EMA) to prevent jitter.
-        Returns: (matches_dict, unassigned_detections_list)
-        """
-        matches: Dict[str, Tuple[SeatZone, Optional[PersonDetection], KinematicEvaluation]] = {}
-        unmatched_dets = list(detections)
-        max_track_dist = max(250.0, float(frame_w) * 0.40)
+        """Bind names once, then follow persistent person IDs independently of seats.
 
-        for seat in seats:
-            matches[seat.id] = (
-                seat,
-                None,
-                KinematicEvaluation(
-                    status="IDLE",
-                    reason_code="NO_PERSON",
-                    arm_angle_deg=0.0,
-                    active_arm=None,
-                    is_raised_candidate=False,
-                ),
-            )
+        A missing person reserves their name for the track retention period. Seat
+        geometry is used only for initial binding, never to rename an active track.
+        """
+        now = time.monotonic() if now is None else now
+        tracks = self.tracker.update(detections, frame_w, frame_h, frame=frame, now=now)
+        active = {seat.id: seat for seat in seats if seat.is_present and seat.student_id
+                  and seat.student_name and not seat.student_name.startswith("Empty")}
+        for track in tracks.values():
+            if track.seat_id not in active:
+                track.seat_id = None
+        reserved = {track.seat_id for track in tracks.values() if track.seat_id}
+        free_seats = [seat for seat in active.values() if seat.id not in reserved]
+        anonymous = [track for track in tracks.values()
+                     if not track.seat_id and track.detection is not None and track.hits >= 2]
+        costs = np.full((len(free_seats), len(anonymous)), np.inf)
+        for i, seat in enumerate(free_seats):
+            normalized = seat.x_max <= 1.0 and seat.y_max <= 1.0
+            sx1, sx2 = (seat.x_min * frame_w, seat.x_max * frame_w) if normalized else (seat.x_min, seat.x_max)
+            sy1, sy2 = (seat.y_min * frame_h, seat.y_max * frame_h) if normalized else (seat.y_min, seat.y_max)
+            for j, track in enumerate(anonymous):
+                px, py = track.anchor
+                if not seat.contains_point(px, py, frame_w, frame_h):
+                    continue
+                distance = np.hypot((px - (sx1 + sx2) / 2) / max(1, sx2 - sx1),
+                                    (py - (sy1 + sy2) / 2) / max(1, sy2 - sy1))
+                overlap = seat.compute_overlap_ratio(track.bbox, frame_w, frame_h)
+                costs[i, j] = .65 * distance + .35 * (1 - overlap)
+        # Identical/overlapping calibration zones cannot establish a safe name.
+        for j in range(len(anonymous)):
+            options = np.sort(costs[:, j])
+            if len(options) > 1 and options[1] < .85 and options[1] - options[0] < .06:
+                costs[:, j] = np.inf
+        for i, j in assign(costs, unmatched_cost=.85):
+            anonymous[j].seat_id = free_seats[i].id
 
-            if not seat.is_present:
-                self.seat_tracks.pop(seat.id, None)
+        matches = {seat.id: (seat, None, KinematicEvaluation("IDLE", "NO_PERSON", 0.0, None, False))
+                   for seat in seats}
+        assigned_ids = set()
+        self.seat_tracks = {seat_id: record for seat_id, record in self.seat_tracks.items()
+                            if seat_id in active and seat_id in {t.seat_id for t in tracks.values()}}
+        for track in tracks.values():
+            if not track.seat_id:
                 continue
-
-            # 1. Best match by direct centroid containment or high box overlap
-            best_det = None
-            best_score = 0.0
-
-            for det in unmatched_dets:
-                xc, yc = det.centroid
-                in_containment = seat.contains_point(xc, yc, frame_w, frame_h)
-                overlap = seat.compute_overlap_ratio(det.bbox, frame_w, frame_h)
-
-                score = 1.0 if in_containment else overlap
-                if score > 0.20 and score > best_score:
-                    best_score = score
-                    best_det = det
-
-            # 2. Adaptive tracking fallback: follow student as they shift or move across frame
-            if best_det is None and seat.id in self.seat_tracks:
-                track = self.seat_tracks[seat.id]
-                if track.get("frames_unseen", 0) < 30:
-                    prev_xc, prev_yc = track["centroid"]
-                    closest_dist = float("inf")
-                    for det in unmatched_dets:
-                        xc, yc = det.centroid
-                        dist = np.hypot(xc - prev_xc, yc - prev_yc)
-                        if dist < max_track_dist and dist < closest_dist:
-                            closest_dist = dist
-                            best_det = det
-
-            if best_det is not None:
-                unmatched_dets.remove(best_det)
-                eval_result = evaluate_pose_kinematics(best_det.pose)
-
-                # Smooth bounding box with Exponential Moving Average (EMA)
-                bx1, by1, bx2, by2 = best_det.bbox
-                if seat.id in self.seat_tracks:
-                    prev_box = self.seat_tracks[seat.id]["bbox"]
-                    alpha = 0.60
-                    sx1 = int(alpha * bx1 + (1.0 - alpha) * prev_box[0])
-                    sy1 = int(alpha * by1 + (1.0 - alpha) * prev_box[1])
-                    sx2 = int(alpha * bx2 + (1.0 - alpha) * prev_box[2])
-                    sy2 = int(alpha * by2 + (1.0 - alpha) * prev_box[3])
-                    smoothed_box = (sx1, sy1, sx2, sy2)
-                else:
-                    smoothed_box = (bx1, by1, bx2, by2)
-
-                self.seat_tracks[seat.id] = {
-                    "bbox": smoothed_box,
-                    "centroid": best_det.centroid,
-                    "frames_unseen": 0,
-                }
-
-                smoothed_det = PersonDetection(
-                    bbox=smoothed_box,
-                    centroid=best_det.centroid,
-                    pose=best_det.pose,
-                    confidence=best_det.confidence,
-                )
-                matches[seat.id] = (seat, smoothed_det, eval_result)
-            else:
-                if seat.id in self.seat_tracks:
-                    self.seat_tracks[seat.id]["frames_unseen"] += 1
-                    if self.seat_tracks[seat.id]["frames_unseen"] > 30:
-                        self.seat_tracks.pop(seat.id, None)
-
-        # 3. Automatic Person-to-Seat Binding: If a person is in the frame and there is an unassigned seat,
-        # bind them immediately so the seat box always locks onto the person dynamically!
-        unmatched_seats = [seat for seat in seats if matches[seat.id][1] is None and seat.is_present]
-        for seat in unmatched_seats:
-            if not unmatched_dets:
-                break
-            det = unmatched_dets.pop(0)
-            eval_result = evaluate_pose_kinematics(det.pose)
-            bx1, by1, bx2, by2 = det.bbox
-
-            if seat.id in self.seat_tracks:
-                prev_box = self.seat_tracks[seat.id]["bbox"]
-                alpha = 0.60
-                sx1 = int(alpha * bx1 + (1.0 - alpha) * prev_box[0])
-                sy1 = int(alpha * by1 + (1.0 - alpha) * prev_box[1])
-                sx2 = int(alpha * bx2 + (1.0 - alpha) * prev_box[2])
-                sy2 = int(alpha * by2 + (1.0 - alpha) * prev_box[3])
-                smoothed_box = (sx1, sy1, sx2, sy2)
-            else:
-                smoothed_box = (bx1, by1, bx2, by2)
-
-            self.seat_tracks[seat.id] = {
-                "bbox": smoothed_box,
-                "centroid": det.centroid,
-                "frames_unseen": 0,
-            }
-            smoothed_det = PersonDetection(
-                bbox=smoothed_box,
-                centroid=det.centroid,
-                pose=det.pose,
-                confidence=det.confidence,
-            )
-            matches[seat.id] = (seat, smoothed_det, eval_result)
-
-        return matches, unmatched_dets
+            seat_id, det = track.seat_id, track.detection
+            old = self.seat_tracks.get(seat_id)
+            if det is None:
+                if old:
+                    old["frames_unseen"] += 1
+                continue
+            smoothed_box = det.bbox
+            if old and old.get("track_id") == track.id and old.get("frames_unseen", 0) == 0:
+                smoothed_box = tuple(int(.85 * value + .15 * previous)
+                                     for value, previous in zip(det.bbox, old["bbox"]))
+            self.seat_tracks[seat_id] = {"bbox": smoothed_box, "centroid": det.centroid,
+                                        "frames_unseen": 0, "track_id": track.id}
+            # Keep raw geometry for kinematics, appearance and biometric cropping.
+            display_det = PersonDetection(smoothed_box, det.centroid, det.pose, det.confidence, track.id)
+            matches[seat_id] = (active[seat_id], display_det, evaluate_pose_kinematics(det.pose))
+            assigned_ids.add(track.id)
+        return matches, [det for det in detections if det.track_id not in assigned_ids]
 
     def render_overlay(
         self,
@@ -374,7 +339,7 @@ class YOLOPoseEngine:
         """
         Renders clean real-time visual overlays:
         - 100% DYNAMIC Seat Bounding Boxes directly tracking the detected person.
-        - Clean green box on hand raise, neutral clean box when seated.
+        - Green first offer; blue 2nd Hand Raised, 3rd Hand Raised, etc.
         - Skeletons (bones & joint dots) turned OFF by default for clean classroom viewing.
         """
         overlay = frame.copy()
@@ -403,7 +368,7 @@ class YOLOPoseEngine:
             font = cv2.FONT_HERSHEY_SIMPLEX
             (tw, th), _ = cv2.getTextSize(text, font, scale, 1)
             pad = 5
-            bx1 = max(2, x)
+            bx1 = min(max(2, x), max(2, img.shape[1] - tw - pad * 2 - 2))
             by1 = max(2, y - th - pad * 2)
             bx2 = min(img.shape[1] - 2, bx1 + tw + pad * 2)
             by2 = max(th + pad * 2, y)
@@ -441,48 +406,16 @@ class YOLOPoseEngine:
                 or not seat.student_name.strip()
             )
 
-            if is_empty_seat:
-                box_color = (120, 120, 130)   # Dimmed Slate Grey
-                pill_bg = (60, 60, 65)
-                status_text = f"{seat.student_name or 'Empty Desk'}"
-                thickness = 1
-            elif not is_session_active:
-                box_color = (230, 175, 40)   # Clean Neutral Blue
-                pill_bg = (140, 95, 20)
-                status_text = f"{seat.student_name} | Standby"
-                thickness = 2
-            else:
-                # Determine participation status & color for dynamic seat box
-                is_valid_raise = eval_res and eval_res.reason_code == "VALID_HAND_RAISE"
-                is_double_hand = eval_res and eval_res.reason_code == "ERR_DOUBLE_HAND_RAISE"
-                is_seat_mismatch = eval_res and eval_res.reason_code == "SEAT_MISMATCH"
-
-                if is_seat_mismatch:
-                    box_color = (0, 0, 240)      # Vivid Crimson Red
-                    pill_bg = (0, 0, 180)
-                    status_text = f"{seat.student_name} | Wrong Seat"
-                    thickness = 3
-                elif is_valid_raise:
-                    box_color = (0, 220, 0)      # Vivid Emerald Green
-                    pill_bg = (0, 150, 0)
-                    status_text = f"{seat.student_name} | HAND RAISED"
-                    thickness = 3
-                elif is_double_hand:
-                    box_color = (0, 140, 255)    # Warning Amber / Orange
-                    pill_bg = (0, 100, 200)
-                    status_text = f"{seat.student_name} | Double Hand Raise"
-                    thickness = 3
-                else:
-                    box_color = (230, 175, 40)   # Clean Neutral Blue
-                    pill_bg = (140, 95, 20)
-                    status_text = f"{seat.student_name} | Standby"
-                    thickness = 2
+            display = person_display_state(
+                seat.student_name, eval_res,
+                (podium_entries or {}).get(seat_id, {}).get("queue_pos"),
+                present=seat.is_present, session_active=is_session_active, empty=is_empty_seat)
 
             # Draw DYNAMIC Seat Bounding Box directly around the student
-            draw_corner_rect(overlay, (bx1, by1), (bx2, by2), box_color, thickness=thickness)
+            draw_corner_rect(overlay, (bx1, by1), (bx2, by2), display.box_color, thickness=display.thickness)
 
             # Draw Header Pill Tag tracking the student's head
-            draw_label_pill(overlay, status_text, bx1, by1 - 4, pill_bg)
+            draw_label_pill(overlay, display.label, bx1, by1 - 4, display.pill_color)
 
             # Draw Skeleton if enabled
             if show_skeleton:
@@ -491,28 +424,14 @@ class YOLOPoseEngine:
         # 2. Render Any Unassigned Students Dynamically
         if unassigned_detections:
             for u_det in unassigned_detections:
-                if u_det.confidence >= 0.52 and self._is_plausible_person(u_det.pose, u_det.bbox):
+                if u_det.confidence >= self.confidence:
                     ubx1, uby1, ubx2, uby2 = u_det.bbox
-                    u_eval = evaluate_pose_kinematics(u_det.pose)
+                    u_eval = u_det.evaluation or evaluate_pose_kinematics(u_det.pose)
 
-                    if u_eval.reason_code == "VALID_HAND_RAISE":
-                        u_box_color = (0, 220, 0)
-                        u_pill_bg = (0, 150, 0)
-                        u_label = "Student | HAND RAISED"
-                        u_thick = 3
-                    elif u_eval.reason_code == "ERR_DOUBLE_HAND_RAISE":
-                        u_box_color = (0, 140, 255)
-                        u_pill_bg = (0, 100, 200)
-                        u_label = "Student | Double Hand Raise"
-                        u_thick = 3
-                    else:
-                        u_box_color = (230, 175, 40)
-                        u_pill_bg = (140, 95, 20)
-                        u_label = "Student | Standby"
-                        u_thick = 2
-
-                    draw_corner_rect(overlay, (ubx1, uby1), (ubx2, uby2), u_box_color, thickness=u_thick)
-                    draw_label_pill(overlay, u_label, ubx1, uby1 - 4, u_pill_bg)
+                    display = person_display_state("Unassigned", u_eval, assigned=False,
+                                                   session_active=is_session_active)
+                    draw_corner_rect(overlay, (ubx1, uby1), (ubx2, uby2), display.box_color, thickness=display.thickness)
+                    draw_label_pill(overlay, display.label, ubx1, uby1 - 4, display.pill_color)
                     if show_skeleton:
                         draw_skeleton(u_det.pose)
 

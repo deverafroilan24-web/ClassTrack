@@ -8,6 +8,7 @@ Handles:
 """
 
 import json
+from urllib.parse import urlparse, urlencode
 import queue
 import threading
 import time
@@ -24,14 +25,23 @@ class DashboardAPIClient:
     def __init__(
         self,
         base_url: str = "http://127.0.0.1:8000",
-        api_key: str = "",
         on_session_command: Optional[Callable[[dict], None]] = None,
+        section_id: str = "",
+        follow_dashboard: Optional[bool] = None,
     ):
+        self.section_id = section_id
         self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
+        self.follow_dashboard = (urlparse(base_url).hostname in {"localhost", "127.0.0.1", "::1"}
+                                 and not section_id) if follow_dashboard is None else follow_dashboard
+        self._context_supported: Optional[bool] = None
+        self._context_generation = None
+        self._selection_revision = -1
+        self._context_update_counter = 0
+        self._command_lock = threading.RLock()
         self.on_session_command = on_session_command
         self._http_connected = False
         self._ws_connected = False
+        self._access_denied = False
         self._ws = None
         self._ws_lock = threading.Lock()
         self._ws_thread: Optional[threading.Thread] = None
@@ -39,10 +49,23 @@ class DashboardAPIClient:
         self._session_id: Optional[str] = None
         self._event_queue: queue.Queue = queue.Queue()
         self._event_thread: Optional[threading.Thread] = None
+        self._event_ingest_version = 1
 
     @property
     def is_connected(self) -> bool:
-        return self._ws_connected or self._http_connected
+        return not self._access_denied and (self._ws_connected or self._http_connected)
+
+    @property
+    def access_denied(self) -> bool:
+        return self._access_denied
+
+    def _record_access_status(self, status_code: int) -> None:
+        if status_code in (401, 403):
+            self._access_denied = True
+            self._http_connected = False
+        elif status_code == 200:
+            self._access_denied = False
+            self._http_connected = True
 
     @property
     def is_ws_connected(self) -> bool:
@@ -61,10 +84,7 @@ class DashboardAPIClient:
         self._session_id = val
 
     def _headers(self) -> dict:
-        h = {"Content-Type": "application/json"}
-        if self.api_key:
-            h["X-Edge-Key"] = self.api_key
-        return h
+        return {"Content-Type": "application/json"}
 
     # ------------------------------------------------------------------
     # REST Endpoints
@@ -73,7 +93,10 @@ class DashboardAPIClient:
     def fetch_sections(self) -> List[Dict[str, Any]]:
         """GET /api/sections"""
         try:
-            resp = requests.get(f"{self.base_url}/api/sections", headers=self._headers(), timeout=5)
+            resp = requests.get(f"{self.base_url}/api/sections",
+                                params={"section_id": self.section_id} if self.section_id else {},
+                                headers=self._headers(), timeout=5)
+            self._record_access_status(resp.status_code)
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
@@ -95,6 +118,10 @@ class DashboardAPIClient:
                     headers=self._headers(),
                     timeout=(5, 15),
                 )
+                self._record_access_status(resp.status_code)
+                if resp.status_code in (401, 403):
+                    print("[APIClient] Camera access denied; deploy the dashboard update that allows camera connections without a key.")
+                    return None
                 resp.raise_for_status()
                 return resp.json()
             except Exception as e:
@@ -109,10 +136,39 @@ class DashboardAPIClient:
         _, session = self.fetch_active_session_result()
         return session
 
+    def fetch_camera_context_result(self) -> tuple[bool, Optional[dict]]:
+        """Reconcile the server's class/session selection together, never by name/order.
+
+        Older deployed backends retain the legacy path until they are updated.
+        A slow response cannot overwrite a newer socket control message.
+        """
+        if self._context_supported is False:
+            return False, None
+        counter = self._context_update_counter
+        params = {"follow_dashboard": "true" if self.follow_dashboard else "false"}
+        if self.section_id:
+            params['section_id'] = self.section_id
+        try:
+            response = requests.get(f"{self.base_url}/api/edge/context", params=params,
+                                    headers=self._headers(), timeout=5)
+            if response.status_code == 404:
+                self._context_supported = False
+                return False, None
+            self._record_access_status(response.status_code)
+            response.raise_for_status()
+            context = response.json()
+            self._context_supported = True
+            self._handle_ws_message(context, expected_counter=counter)
+            return True, context
+        except requests.RequestException as error:
+            print(f"[APIClient] Failed to fetch camera context: {error}")
+            return False, None
+
     def fetch_active_session_result(self) -> tuple[bool, Optional[Dict[str, Any]]]:
         """Distinguish an idle dashboard from a failed request."""
         try:
-            resp = requests.get(f"{self.base_url}/api/sessions/active", headers=self._headers(), timeout=5)
+            resp = requests.get(f"{self.base_url}/api/sessions/active", params={"section_id": self.section_id} if self.section_id else {}, headers=self._headers(), timeout=5)
+            self._record_access_status(resp.status_code)
             if resp.status_code == 200:
                 data = resp.json()
                 self._session_id = data.get("id") if data else None
@@ -122,12 +178,40 @@ class DashboardAPIClient:
             print(f"[APIClient] Failed to fetch active session: {e}")
         return False, None
 
+    def fetch_camera_settings(self) -> Optional[dict]:
+        """Recover the selected classroom's controls after missed socket messages."""
+        try:
+            response = requests.get(
+                f"{self.base_url}/api/camera/settings",
+                params={"section_id": self.section_id} if self.section_id else {},
+                headers=self._headers(), timeout=5,
+            )
+            response.raise_for_status()
+            data = response.json()
+            self._record_event_capability(data)
+            return data.get("settings")
+        except requests.RequestException as error:
+            print(f"[APIClient] Failed to fetch camera settings: {error}")
+            return None
+
+    def _record_event_capability(self, message: dict) -> None:
+        version = message.get("event_ingest_version", 1)
+        self._event_ingest_version = version if isinstance(version, int) and version >= 1 else 1
+
+    def _event_payload(self, event_payload: dict) -> dict:
+        """Send optional metadata only to dashboards advertising its schema."""
+        payload = dict(event_payload)
+        if self._event_ingest_version < 2:
+            payload.pop("verification_status", None)
+            payload.pop("face_similarity", None)
+        return payload
+
     def post_event(self, event_payload: dict) -> bool:
         """POST /api/events/ingest — send a gesture event to the dashboard."""
         try:
             resp = requests.post(
                 f"{self.base_url}/api/events/ingest",
-                json=event_payload,
+                json=self._event_payload(event_payload),
                 headers=self._headers(),
                 timeout=3,
             )
@@ -157,7 +241,7 @@ class DashboardAPIClient:
                     try:
                         response = requests.post(
                             f"{self.base_url}/api/events/ingest",
-                            json=payload, headers=self._headers(), timeout=5,
+                            json=self._event_payload(payload), headers=self._headers(), timeout=5,
                         )
                         if response.status_code == 200:
                             break
@@ -193,9 +277,10 @@ class DashboardAPIClient:
             return False
 
     def check_connection(self) -> bool:
-        """Quick health check against the dashboard."""
+        """Check camera access to the roster, rather than public server health."""
         try:
-            resp = requests.get(f"{self.base_url}/api/edge/status", headers=self._headers(), timeout=3)
+            resp = requests.get(f"{self.base_url}/api/sections", headers=self._headers(), timeout=5)
+            self._record_access_status(resp.status_code)
             self._http_connected = resp.status_code == 200
             return self._http_connected
         except Exception:
@@ -232,11 +317,16 @@ class DashboardAPIClient:
         while self._ws_running:
             try:
                 ws = websocket.WebSocket()
-                ws_headers = {"X-Edge-Key": self.api_key} if self.api_key else {}
-                ws.connect(ws_url, timeout=5, header=ws_headers)
+                params = {}
+                if self.section_id:
+                    params['section_id'] = self.section_id
+                if self.follow_dashboard:
+                    params['follow_dashboard'] = '1'
+                ws.connect(ws_url + ("?" + urlencode(params) if params else ""), timeout=5)
                 with self._ws_lock:
                     self._ws = ws
                 self._ws_connected = True
+                self._access_denied = False
                 backoff_sec = 3.0  # reset backoff on success
                 print(f"[APIClient] Connected to dashboard WebSocket: {ws_url}")
 
@@ -245,7 +335,7 @@ class DashboardAPIClient:
                         ws.settimeout(5.0)
                         data = ws.recv()
                         if not data:
-                            continue
+                            break
                         if data in ("pong", "ping"):
                             continue
                         try:
@@ -277,12 +367,63 @@ class DashboardAPIClient:
                 time.sleep(backoff_sec)
                 backoff_sec = min(12.0, backoff_sec * 1.5)
 
-    def _handle_ws_message(self, msg: dict):
+    def select_section(self, section_id, manual=False):
+        binding_changed = manual and self.follow_dashboard
+        if manual:
+            self.follow_dashboard = False
+        if not section_id or (section_id == self.section_id and not binding_changed):
+            return
+        self.section_id = section_id
+        self._session_id = None
+        self._context_update_counter += 1
+        with self._ws_lock:
+            if self._ws_connected and self._ws:
+                try:
+                    self._ws.send(json.dumps({'type': 'SELECT_SECTION', 'section_id': section_id,
+                                              'follow_dashboard': self.follow_dashboard}))
+                except Exception as error:
+                    self._ws_connected = False
+                    print(f"[APIClient] Section selection will retry on reconnect: {error}")
+
+    def _handle_ws_message(self, msg: dict, expected_counter=None):
         """Handle commands from the web dashboard."""
+        # Commands and REST snapshots share one ordered application path.
+        # select_section never takes this lock: a callback holds the camera's
+        # section lock, so taking both in opposite order could deadlock.
+        with self._command_lock:
+            if expected_counter is not None and expected_counter != self._context_update_counter:
+                return
+            self._apply_ws_message(msg)
+
+    def _apply_ws_message(self, msg: dict):
         msg_type = msg.get("type", "")
 
+        control = msg_type in {"EDGE_INIT", "SECTION_SELECTED", "SESSION_STARTED", "SESSION_STOPPED"}
+        if (msg_type == 'EDGE_INIT' and not self.follow_dashboard and self.section_id
+                and msg.get('selected_section_id') and msg['selected_section_id'] != self.section_id):
+            return
+        if msg.get("section_id") and self.section_id and msg["section_id"] != self.section_id:
+            return
+
+        revision = msg.get('selection_revision')
+        generation = msg.get('context_generation')
+        if control and isinstance(revision, int):
+            if generation != self._context_generation:
+                self._context_generation = generation
+                self._selection_revision = -1
+            if revision < self._selection_revision:
+                return
+            self._selection_revision = revision
+        if control:
+            self._context_update_counter += 1
+
         if msg_type == "EDGE_INIT":
+            self._record_event_capability(msg)
+            if msg.get('camera_binding_version') == 2:
+                self._context_supported = True
             active = msg.get("active_session")
+            if 'selected_section_id' in msg:
+                self.section_id = msg['selected_section_id'] or ''
             if active:
                 self._session_id = active.get("id")
                 print(f"[APIClient] Active session: {self._session_id}")

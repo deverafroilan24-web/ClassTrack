@@ -19,6 +19,7 @@ class SeatStateData:
     student_name: str
     state: GestureState = GestureState.IDLE
     candidate_start_ms: Optional[int] = None
+    candidate_timestamp_ms: Optional[int] = None
     confirmed_at_ms: Optional[int] = None
     last_evaluation: Optional[KinematicEvaluation] = None
     last_event_id: Optional[str] = None
@@ -49,11 +50,11 @@ class GestureEventPayload:
 class HandRaiseStateMachine:
     """
     State machine per seat implementing:
-    - 0.8s (800ms) debounce duration check before triggering VALID_HAND_RAISE.
+    - Configurable sustained-pose confirmation before triggering VALID_HAND_RAISE.
     - ERR_DOUBLE_HAND_RAISE detection.
     - ERR_ELBOW_ACUTE_ANGLE detection.
-    - ERR_INSUFFICIENT_DURATION emission if dropped prior to 0.8s threshold.
-    - Sub-frame millisecond queue registration upon reaching 0.8s.
+    - ERR_INSUFFICIENT_DURATION emission for short aborted raises.
+    - Queue registration at confirmation, ranked by the first observed raise time.
     - HAND_LOWERED event emission when hand is lowered from CONFIRMED.
     - 1.5s cooldown after release to prevent repeated counter increments.
     """
@@ -62,15 +63,17 @@ class HandRaiseStateMachine:
         self,
         podium_queue: PodiumQueueManager,
         on_event_callback: Callable[[GestureEventPayload], None],
-        debounce_duration_sec: float = 0.8,
+        debounce_duration_sec: float = 0.20,
         cooldown_sec: float = 1.5,
-        drop_grace_sec: float = 0.4,
+        drop_grace_sec: float = 0.05,
+        missing_grace_sec: float = 0.5,
     ):
         self.podium_queue = podium_queue
         self.on_event_callback = on_event_callback
         self.debounce_ms = int(debounce_duration_sec * 1000)
         self.cooldown_ms = int(cooldown_sec * 1000)
         self.drop_grace_ms = int(drop_grace_sec * 1000)
+        self.missing_grace_ms = int(missing_grace_sec * 1000)
         self._seat_states: Dict[str, SeatStateData] = {}
         self._event_counter = 0
 
@@ -93,6 +96,24 @@ class HandRaiseStateMachine:
         self.podium_queue.clear()
         self._seat_states.clear()
 
+    def raise_order_key(self, seat_id: str, observed_ms: int):
+        state = self._seat_states.get(seat_id)
+        timestamp = state.candidate_timestamp_ms if state else None
+        return (timestamp if timestamp is not None else observed_ms, seat_id)
+
+    def has_earlier_candidate(self, seat_id: str, observed_ms: int) -> bool:
+        """Hold later confirmations while an earlier candidate is being verified."""
+        order = self.raise_order_key(seat_id, observed_ms)
+        return any(state.seat_id != seat_id and state.state == GestureState.CANDIDATE
+                   and state.candidate_timestamp_ms is not None
+                   and (state.candidate_timestamp_ms, state.seat_id) < order
+                   for state in self._seat_states.values())
+
+    def pending_priority_timestamps(self):
+        """Include candidate reservations through the short missing-keypoint grace."""
+        return {state.seat_id: state.candidate_timestamp_ms for state in self._seat_states.values()
+                if state.state == GestureState.CANDIDATE and state.candidate_timestamp_ms is not None}
+
     def process_seat_frame(
         self,
         seat_id: str,
@@ -100,12 +121,20 @@ class HandRaiseStateMachine:
         evaluation: KinematicEvaluation,
         session_id: Optional[str] = None,
         now_ms: Optional[int] = None,
+        allow_confirmation: bool = True,
+        clock_ms: Optional[int] = None,
+        raise_started_ms: Optional[int] = None,
+        raise_started_clock_ms: Optional[int] = None,
+        priority_rank: Optional[int] = None,
+        priority_delta_ms: Optional[int] = None,
     ) -> Optional[GestureEventPayload]:
         """
         Processes a single frame evaluation for a given seat.
         Transitions states and emits events through the callback.
         """
-        current_time_ms = now_ms if now_ms is not None else (time.time_ns() // 1_000_000)
+        event_time_ms = now_ms if now_ms is not None else (time.time_ns() // 1_000_000)
+        current_time_ms = (clock_ms if clock_ms is not None else
+                           now_ms if now_ms is not None else int(time.monotonic() * 1000))
         state_data = self.get_state(seat_id, student_name)
         state_data.last_evaluation = evaluation
 
@@ -119,6 +148,11 @@ class HandRaiseStateMachine:
                 self.podium_queue.release_raise(seat_id)
                 state_data.state = GestureState.IDLE
                 state_data.confirmed_at_ms = None
+                state_data.last_confirmed_released_ms = current_time_ms
+            state_data.candidate_start_ms = None
+            state_data.candidate_timestamp_ms = None
+            state_data.drop_unseen_ms = None
+            state_data.podium_entry = None
 
             # Only emit invalid notification when reason changes or once per occurrence
             if state_data.last_reported_reason != evaluation.reason_code:
@@ -134,7 +168,7 @@ class HandRaiseStateMachine:
                     duration_sec=0.0,
                     queue_pos=None,
                     delta_ms=None,
-                    timestamp_ms=current_time_ms,
+                    timestamp_ms=event_time_ms,
                     earned_point=None,
                 )
                 self.on_event_callback(evt)
@@ -144,10 +178,17 @@ class HandRaiseStateMachine:
         # If IDLE / NO_RAISE
         if evaluation.status == "IDLE" or not evaluation.is_raised_candidate:
             if state_data.state == GestureState.CANDIDATE:
-                # Dropped before 0.8s debounce threshold!
-                elapsed_ms = current_time_ms - (state_data.candidate_start_ms or current_time_ms)
+                # Keep a short keypoint/camera gap from restarting confirmation.
+                if evaluation.reason_code in {"NO_PERSON", "KEYPOINTS_MISSING"}:
+                    if state_data.drop_unseen_ms is None:
+                        state_data.drop_unseen_ms = current_time_ms
+                    if current_time_ms - state_data.drop_unseen_ms < 120:
+                        return None
+                elapsed_ms = current_time_ms - (state_data.candidate_start_ms if state_data.candidate_start_ms is not None else current_time_ms)
                 state_data.state = GestureState.IDLE
                 state_data.candidate_start_ms = None
+                state_data.candidate_timestamp_ms = None
+                state_data.drop_unseen_ms = None
                 state_data.last_reported_reason = "ERR_INSUFFICIENT_DURATION"
 
                 evt = GestureEventPayload(
@@ -161,7 +202,7 @@ class HandRaiseStateMachine:
                     duration_sec=round(elapsed_ms / 1000.0, 2),
                     queue_pos=None,
                     delta_ms=None,
-                    timestamp_ms=current_time_ms,
+                    timestamp_ms=event_time_ms,
                     earned_point=None,
                 )
                 self.on_event_callback(evt)
@@ -173,18 +214,21 @@ class HandRaiseStateMachine:
                     state_data.drop_unseen_ms = current_time_ms
 
                 drop_elapsed = current_time_ms - state_data.drop_unseen_ms
-                if drop_elapsed >= self.drop_grace_ms:
+                grace_ms = self.missing_grace_ms if evaluation.reason_code == "NO_PERSON" else self.drop_grace_ms
+                if drop_elapsed >= grace_ms:
                     # Sustained lower: student has put their hand down!
                     total_duration = 0.0
-                    if state_data.candidate_start_ms:
+                    if state_data.candidate_start_ms is not None:
                         total_duration = round((current_time_ms - state_data.candidate_start_ms) / 1000.0, 2)
                     self.podium_queue.release_raise(seat_id)
                     state_data.state = GestureState.IDLE
                     state_data.confirmed_at_ms = None
                     state_data.candidate_start_ms = None
+                    state_data.candidate_timestamp_ms = None
                     state_data.drop_unseen_ms = None
                     state_data.last_confirmed_released_ms = current_time_ms
                     state_data.last_reported_reason = None
+                    state_data.podium_entry = None
 
                     # Emit HAND_LOWERED event to immediately reset podium queue and ledger
                     evt = GestureEventPayload(
@@ -198,7 +242,7 @@ class HandRaiseStateMachine:
                         duration_sec=total_duration,
                         queue_pos=None,
                         delta_ms=None,
-                        timestamp_ms=current_time_ms,
+                        timestamp_ms=event_time_ms,
                         earned_point=None,
                     )
                     self.on_event_callback(evt)
@@ -209,6 +253,8 @@ class HandRaiseStateMachine:
                     "ERR_DOUBLE_HAND_RAISE",
                     "ERR_HAND_NOT_HIGH_ENOUGH",
                     "ERR_ELBOW_ACUTE_ANGLE",
+                    "SEAT_MISMATCH",
+                    "ERR_INSUFFICIENT_DURATION",
                 }:
                     state_data.last_reported_reason = None
                     evt = GestureEventPayload(
@@ -222,7 +268,7 @@ class HandRaiseStateMachine:
                         duration_sec=0.0,
                         queue_pos=None,
                         delta_ms=None,
-                        timestamp_ms=current_time_ms,
+                        timestamp_ms=event_time_ms,
                         earned_point=None,
                     )
                     self.on_event_callback(evt)
@@ -230,8 +276,9 @@ class HandRaiseStateMachine:
                 state_data.last_reported_reason = None
             return None
 
-        # Candidate Valid Raise (1 wrist above nose + 100 <= theta <= 175)
+        # A valid single-arm pose; display state is independent of queue cooldown.
         if evaluation.is_raised_candidate:
+            state_data.drop_unseen_ms = None
             if state_data.state == GestureState.CONFIRMED:
                 # Arm is still raised, cancel any drop grace timer
                 state_data.drop_unseen_ms = None
@@ -248,13 +295,16 @@ class HandRaiseStateMachine:
 
                 # Start debounce timer
                 state_data.state = GestureState.CANDIDATE
-                state_data.candidate_start_ms = current_time_ms
+                state_data.candidate_start_ms = (raise_started_clock_ms if raise_started_clock_ms is not None
+                                                else current_time_ms)
+                state_data.candidate_timestamp_ms = (raise_started_ms if raise_started_ms is not None
+                                                    else event_time_ms)
                 state_data.last_reported_reason = "CANDIDATE"
                 return None
 
             elif state_data.state == GestureState.CANDIDATE:
-                elapsed_ms = current_time_ms - (state_data.candidate_start_ms or current_time_ms)
-                if elapsed_ms >= self.debounce_ms:
+                elapsed_ms = current_time_ms - (state_data.candidate_start_ms if state_data.candidate_start_ms is not None else current_time_ms)
+                if elapsed_ms >= self.debounce_ms and allow_confirmation:
                     # Sustained duration threshold reached! Transition to CONFIRMED
                     state_data.state = GestureState.CONFIRMED
                     state_data.confirmed_at_ms = current_time_ms
@@ -265,7 +315,9 @@ class HandRaiseStateMachine:
                         seat_id=seat_id,
                         student_name=student_name,
                         arm_angle=evaluation.arm_angle_deg,
-                        timestamp_ms=current_time_ms,
+                        timestamp_ms=state_data.candidate_timestamp_ms,
+                        queue_position=priority_rank,
+                        delta_ms=priority_delta_ms,
                     )
                     state_data.podium_entry = podium_entry
                     state_data.last_reported_reason = "VALID_HAND_RAISE"
@@ -285,7 +337,7 @@ class HandRaiseStateMachine:
                         duration_sec=duration_sec,
                         queue_pos=podium_entry.queue_position,
                         delta_ms=podium_entry.delta_ms,
-                        timestamp_ms=podium_entry.timestamp_ms,
+                        timestamp_ms=state_data.candidate_timestamp_ms,
                         earned_point=None,
                     )
                     self.on_event_callback(evt)

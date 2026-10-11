@@ -232,9 +232,10 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">Plug &amp; Play System</div>
+      <div class="badge">Camera Version 1.0.1</div>
       <h1>ClassTrack Quick Start</h1>
       <p class="subtitle">Automated AI Classroom Participation &amp; Recitation Tracking</p>
+      <p class="subtitle">Local source setup: run <strong>Source_Code/START_ALL.bat</strong>, then open <a href="http://127.0.0.1:8000/admin">the local admin page</a>. Default ID: <strong>admin1</strong> &middot; Password: <strong>admin1234567</strong>. Create teacher accounts there, then sign in as a teacher to manage classes.</p>
     </header>
 
     <div class="grid">
@@ -246,7 +247,7 @@
         
         <ul class="steps">
           <li data-step="1">Open the cloud link in Chrome, Safari, or Edge.</li>
-          <li data-step="2">Select your class section (e.g., <strong>BSIT-3</strong>).</li>
+          <li data-step="2">Sign in with your teacher account and select your class section (e.g., <strong>BSIT-3</strong>).</li>
           <li data-step="3">Click <strong>"Start Class Session"</strong> to begin recitation monitoring.</li>
           <li data-step="4">Tap <strong>"+1 Point"</strong> when students answer, or <strong>"End Session"</strong> to export CSV grades.</li>
         </ul>
@@ -264,9 +265,11 @@
         
         <ul class="steps">
           <li data-step="1">Locate and double-click <strong>ClassTrack_Setup_v1.0.exe</strong>.</li>
-          <li data-step="2">Click <strong>Next &rarr; Install</strong> (no Python or coding needed).</li>
+          <li data-step="2">Close any older camera app, then click <strong>Next &rarr; Install</strong> for version <strong>1.0.1</strong>.</li>
           <li data-step="3">Launch <strong>ClassTrack</strong> from your Windows Desktop.</li>
-          <li data-step="4">The camera window will open with real-time pose HUD overlay!</li>
+          <li data-step="4">Sign in to the teacher dashboard and select your class. Press <strong>C</strong> in the camera until its section matches, then <strong>R</strong> to load the roster. Match the seating layout to your students.</li>
+          <li data-step="5">Click <strong>Start Class Session</strong> to begin recording hand raises.</li>
+          <li data-step="6"><strong>The first raiser's box turns green</strong> and shows HAND RAISED. Others stay blue and show their names + 2nd Hand Raised, 3rd Hand Raised, etc. Nobody is promoted when a hand lowers; the order resets after everyone lowers. No camera key is required.</li>
         </ul>
 
         <a href="dist/installer/ClassTrack_Setup_v1.0.exe" class="btn btn-secondary">
@@ -297,6 +300,9 @@
           <div style="background: rgba(255,255,255,0.05); padding: 12px; border-radius: 8px;">
             <strong style="color: #60a5fa;">[ R ]</strong> Full Remote Refresh
           </div>
+          <div style="background: rgba(255,255,255,0.05); padding: 12px; border-radius: 8px;">
+            <strong style="color: #60a5fa;">[ F ] or [ K ]</strong> Restart / Re-scan Camera
+          </div>
         </div>
       </div>
     </div>
@@ -317,7 +323,7 @@
 
       <div class="faq-item">
         <div class="faq-q">How do I test hand tracking at home?</div>
-        <div class="faq-a">1. Open the Web Dashboard on your browser and click "Start Class Session".<br>2. Launch the Desktop Camera app and point your webcam at yourself.<br>3. Raise your hand high — the camera HUD turns green, and your seat immediately pops up at the top of the recitation queue on the web dashboard!</div>
+        <div class="faq-a">1. Sign in to the Web Dashboard, select a section, and start a session.<br>2. Launch the camera, select the same section with C, refresh with R, and match your desk layout.<br>3. Raise your hand and hold it until confirmed. The first raiser gets a green box and HAND RAISED; others stay blue and show 2nd Hand Raised, 3rd Hand Raised, etc. Lowering a hand does not renumber the others; everyone lowering resets the order for the next question.</div>
       </div>
     </div>
 

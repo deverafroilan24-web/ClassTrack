@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional, Tuple
 
 
@@ -31,6 +31,7 @@ class SkeletonPose:
     right_wrist: Optional[Point2D] = None
     left_hip: Optional[Point2D] = None
     right_hip: Optional[Point2D] = None
+    image_aspect_ratio: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -105,20 +106,21 @@ def is_arm_resting_behind_neck(
     ):
         return False
 
+    scale = max(.015, abs(shoulder.y - head_y))
     el_dist = abs(elbow.x - head_x)
     sh_dist = abs(shoulder.x - head_x)
     wr_dist = abs(wrist.x - head_x)
 
     # Elbow flared lateral to head/shoulder or elevated near/above shoulder
-    is_elbow_flared_or_up = (el_dist > sh_dist - 0.02) or (el_dist > 0.12) or (elbow.y < shoulder.y + 0.06)
+    is_elbow_flared_or_up = el_dist > sh_dist - scale * .1 or elbow.y < shoulder.y + scale * .15
     # Wrist tucked inward towards the head/neck centerline
-    is_wrist_at_neck_center = (wr_dist < el_dist - 0.03) or (wr_dist < 0.13)
+    is_wrist_at_neck_center = wr_dist < el_dist - scale * .15 or wr_dist < scale * .45
     # Wrist is near head/neck/upper chest level (NOT extended high above head in the air)
-    is_wrist_near_neck_level = wrist.y >= (head_y - 0.05)
+    is_wrist_near_neck_level = wrist.y >= head_y
 
     vert_forearm = abs(elbow.y - wrist.y)
     horiz_forearm = abs(elbow.x - wrist.x)
-    is_inward_or_horizontal = horiz_forearm >= (vert_forearm * 0.50) or (wr_dist < 0.09)
+    is_inward_or_horizontal = horiz_forearm >= vert_forearm * .5 or wr_dist < scale * .3
 
     angle = calculate_joint_angle(shoulder, elbow, wrist)
     is_folded = angle < 95.0
@@ -161,11 +163,12 @@ def evaluate_arm(
     # Biomechanical Hand Raise Posture Validation:
     # 1. Wrist must be clearly higher than the elbow
     vert_forearm_diff = elbow.y - wrist.y  # positive when wrist is above elbow
-    is_wrist_above_elbow = vert_forearm_diff > 0.04
+    scale = max(.015, abs(shoulder.y - ref_head_y))
+    is_wrist_above_elbow = vert_forearm_diff > scale * .10
 
     # 2. Wrist must be distinctly elevated above the shoulder line (not down at mid-chest)
     vert_shoulder_diff = shoulder.y - wrist.y  # positive when wrist is above shoulder
-    is_wrist_above_shoulder = vert_shoulder_diff > 0.05
+    is_wrist_above_shoulder = vert_shoulder_diff > scale * .15
 
     # 3. Forearm orientation: In a genuine hand raise, forearm extends predominantly UPWARD.
     horiz_forearm_diff = abs(wrist.x - elbow.x)
@@ -205,195 +208,39 @@ def evaluate_arm(
 
 
 def evaluate_pose_kinematics(pose: SkeletonPose, min_confidence: float = 0.25) -> KinematicEvaluation:
+    """Evaluate each arm independently using person-relative head clearance.
+
+    Two valid raised arms remain an invalid double raise. A resting opposite arm
+    does not cancel a single raised hand, and missing joints are unknown, not down.
     """
-    Evaluates biomechanical kinematic rules on a detected skeleton pose:
-    1. Check for double hand raise: both arms lifted -> ERR_DOUBLE_HAND_RAISE ("Two hands raised, not Counted").
-    2. Check single hand raise:
-       - Single arm lifted with forearm upright & valid elbow angle (55° - 180°) -> VALID_HAND_RAISE.
-    3. Normal seated / idle posture -> NO_RAISE.
-    """
-    # Detect head boundary using available landmarks (eyes, ears, nose)
-    head_pts = [
-        p for p in [pose.left_eye, pose.right_eye, pose.left_ear, pose.right_ear, pose.nose]
-        if p is not None and p.confidence >= min_confidence
-    ]
-    if head_pts:
-        facial_y = min(p.y for p in head_pts)
-        head_x = sum(p.x for p in head_pts) / len(head_pts)
-    elif pose.nose and pose.nose.confidence >= min_confidence:
-        facial_y = pose.nose.y
-        head_x = pose.nose.x
-    elif pose.left_shoulder or pose.right_shoulder:
-        sh_pts = [p for p in [pose.left_shoulder, pose.right_shoulder] if p is not None and p.confidence >= min_confidence]
-        facial_y = (min(p.y for p in sh_pts) - 0.12) if sh_pts else 0.3
-        head_x = (sum(p.x for p in sh_pts) / len(sh_pts)) if sh_pts else 0.5
-    else:
-        facial_y = 0.3
-        head_x = 0.5
-
-    # True top of head / crown:
-    # Facial landmarks (eyes/ears/nose) sit in the middle/lower part of the head.
-    # The actual crown of the head / top of hair extends significantly higher (by ~25-35% of torso-to-face distance).
-    # To count as a literal Hand Raise, the wrist must be higher than the true top of the head crown.
-    sh_pts = [p for p in [pose.left_shoulder, pose.right_shoulder] if p is not None and p.confidence >= min_confidence]
-    if sh_pts:
-        sh_avg_y = sum(p.y for p in sh_pts) / len(sh_pts)
-        head_clearance = max(0.065, (sh_avg_y - facial_y) * 0.32)
-    else:
-        head_clearance = 0.065
-
-    head_y = facial_y - head_clearance
-
-    # 1. Check if EITHER arm is in a behind-neck / behind-head resting posture:
-    # A student with one hand resting/clasped behind their neck or head is lounging, resting, or stretching.
-    left_behind = is_arm_resting_behind_neck(
-        pose.left_shoulder, pose.left_elbow, pose.left_wrist, head_x, head_y, min_confidence
-    )
-    right_behind = is_arm_resting_behind_neck(
-        pose.right_shoulder, pose.right_elbow, pose.right_wrist, head_x, head_y, min_confidence
-    )
-    if left_behind or right_behind:
-        return KinematicEvaluation(
-            status="IDLE",
-            reason_code="NO_RAISE",
-            arm_angle_deg=0.0,
-            active_arm=None,
-            is_raised_candidate=False,
-        )
-
-    # 2. Dual Elevated Elbows Check (Lounging / Hands-Behind-Head / Stretching posture):
-    # In a legitimate single hand raise, exactly ONE arm is elevated while the other arm rests down.
-    # If BOTH elbows are elevated near or above shoulder level, this is only a gesture if BOTH hands are
-    # genuinely raised high in the air (ERR_DOUBLE_HAND_RAISE); otherwise it is a lounging/resting posture.
-    sh_l, sh_r = pose.left_shoulder, pose.right_shoulder
-    el_l, el_r = pose.left_elbow, pose.right_elbow
-    wr_l, wr_r = pose.left_wrist, pose.right_wrist
-
-    has_both_arms = (
-        sh_l and sh_r and el_l and el_r
-        and sh_l.confidence >= min_confidence
-        and sh_r.confidence >= min_confidence
-        and el_l.confidence >= min_confidence
-        and el_r.confidence >= min_confidence
-    )
-
-    if has_both_arms:
-        left_el_up = el_l.y < sh_l.y + 0.06
-        right_el_up = el_r.y < sh_r.y + 0.06
-        if left_el_up and right_el_up:
-            # Check if this is a genuine double hand raise held high into the air:
-            both_wrists_valid = (
-                wr_l and wr_r
-                and wr_l.confidence >= min_confidence
-                and wr_r.confidence >= min_confidence
-            )
-            if both_wrists_valid:
-                lw_high = wr_l.y < head_y - 0.02
-                rw_high = wr_r.y < head_y - 0.02
-                lw_above_el = wr_l.y < el_l.y - 0.03
-                rw_above_el = wr_r.y < el_r.y - 0.03
-                wrists_separated = abs(wr_l.x - wr_r.x) > 0.12
-                not_at_neck = abs(wr_l.x - head_x) > 0.08 and abs(wr_r.x - head_x) > 0.08
-                angle_l = calculate_joint_angle(sh_l, el_l, wr_l)
-                angle_r = calculate_joint_angle(sh_r, el_r, wr_r)
-                angles_open = angle_l >= 60.0 and angle_r >= 60.0
-
-                if lw_high and rw_high and lw_above_el and rw_above_el and wrists_separated and not_at_neck and angles_open:
-                    avg_angle = (angle_l + angle_r) / 2.0
-                    return KinematicEvaluation(
-                        status="INVALID",
-                        reason_code="ERR_DOUBLE_HAND_RAISE",
-                        arm_angle_deg=round(avg_angle, 1),
-                        active_arm="both",
-                        is_raised_candidate=False,
-                    )
-            # Both elbows elevated but not meeting strict double raise criteria -> Lounging/Resting posture
-            return KinematicEvaluation(
-                status="IDLE",
-                reason_code="NO_RAISE",
-                arm_angle_deg=0.0,
-                active_arm=None,
-                is_raised_candidate=False,
-            )
-
-    left_arm = evaluate_arm(
-        pose.left_shoulder,
-        pose.left_elbow,
-        pose.left_wrist,
-        nose=pose.nose,
-        head_y=head_y,
-        head_x=head_x,
-        min_confidence=min_confidence,
-    )
-    right_arm = evaluate_arm(
-        pose.right_shoulder,
-        pose.right_elbow,
-        pose.right_wrist,
-        nose=pose.nose,
-        head_y=head_y,
-        head_x=head_x,
-        min_confidence=min_confidence,
-    )
-
-    left_lifted = left_arm is not None and left_arm.is_lifted
-    right_lifted = right_arm is not None and right_arm.is_lifted
-
-    # Rule 1: ERR_DOUBLE_HAND_RAISE
-    # Both arms lifted -> Invalid double hand gesture ("Two hands raised, not Counted")
-    if left_lifted and right_lifted:
-        avg_angle = (left_arm.angle_deg + right_arm.angle_deg) / 2.0
-        return KinematicEvaluation(
-            status="INVALID",
-            reason_code="ERR_DOUBLE_HAND_RAISE",
-            arm_angle_deg=round(avg_angle, 1),
-            active_arm="both",
-            is_raised_candidate=False,
-            left_kinematics=left_arm,
-            right_kinematics=right_arm,
-        )
-
-    # Determine which single arm is lifted
-    active_arm_eval: Optional[ArmKinematics] = None
-    active_arm_name: Optional[str] = None
-
-    if left_lifted:
-        active_arm_eval = left_arm
-        active_arm_name = "left"
-    elif right_lifted:
-        active_arm_eval = right_arm
-        active_arm_name = "right"
-
-    # If neither arm is lifted, normal seated posture
-    if active_arm_eval is None:
-        return KinematicEvaluation(
-            status="IDLE",
-            reason_code="NO_RAISE",
-            arm_angle_deg=0.0,
-            active_arm=None,
-            is_raised_candidate=False,
-            left_kinematics=left_arm,
-            right_kinematics=right_arm,
-        )
-
-    # Valid hand raise: Single arm lifted with natural angle (55° - 180°)
-    if active_arm_eval.is_valid_angle:
-        return KinematicEvaluation(
-            status="VALID",
-            reason_code="VALID_HAND_RAISE",
-            arm_angle_deg=active_arm_eval.angle_deg,
-            active_arm=active_arm_name,
-            is_raised_candidate=True,
-            left_kinematics=left_arm,
-            right_kinematics=right_arm,
-        )
-
-    # If lifted but acute angle (< 50 deg, e.g. scratching head or chin rest):
-    return KinematicEvaluation(
-        status="IDLE",
-        reason_code="NO_RAISE",
-        arm_angle_deg=active_arm_eval.angle_deg,
-        active_arm=active_arm_name,
-        is_raised_candidate=False,
-        left_kinematics=left_arm,
-        right_kinematics=right_arm,
-    )
+    # X/Y must share a scale for angles and forearm direction in wide video.
+    if pose.image_aspect_ratio != 1.0:
+        points = {name: replace(point, x=point.x * pose.image_aspect_ratio)
+                  for name, point in vars(pose).items() if isinstance(point, Point2D)}
+        pose = replace(pose, **points, image_aspect_ratio=1.0)
+    head_pts = [p for p in (pose.left_eye, pose.right_eye, pose.left_ear, pose.right_ear, pose.nose)
+                if p is not None and p.confidence >= min_confidence]
+    shoulders = [p for p in (pose.left_shoulder, pose.right_shoulder)
+                 if p is not None and p.confidence >= min_confidence]
+    if not head_pts or not shoulders:
+        return KinematicEvaluation("IDLE", "KEYPOINTS_MISSING", 0.0, None, False)
+    facial_y = min(p.y for p in head_pts)
+    head_x = sum(p.x for p in head_pts) / len(head_pts)
+    face_to_shoulder = max(.015, sum(p.y for p in shoulders) / len(shoulders) - facial_y)
+    head_y = facial_y - face_to_shoulder * .28
+    left = evaluate_arm(pose.left_shoulder, pose.left_elbow, pose.left_wrist,
+                        head_y=head_y, head_x=head_x, min_confidence=min_confidence)
+    right = evaluate_arm(pose.right_shoulder, pose.right_elbow, pose.right_wrist,
+                         head_y=head_y, head_x=head_x, min_confidence=min_confidence)
+    left_up = left is not None and left.is_lifted and left.is_valid_angle
+    right_up = right is not None and right.is_lifted and right.is_valid_angle
+    if left_up and right_up:
+        return KinematicEvaluation("INVALID", "ERR_DOUBLE_HAND_RAISE",
+                                   round((left.angle_deg + right.angle_deg) / 2, 1),
+                                   "both", False, left, right)
+    if left_up or right_up:
+        arm, name = (left, "left") if left_up else (right, "right")
+        return KinematicEvaluation("VALID", "VALID_HAND_RAISE", arm.angle_deg,
+                                   name, True, left, right)
+    reason = "KEYPOINTS_MISSING" if left is None or right is None else "NO_RAISE"
+    return KinematicEvaluation("IDLE", reason, 0.0, None, False, left, right)

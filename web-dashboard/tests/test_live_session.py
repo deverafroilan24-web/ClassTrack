@@ -20,12 +20,12 @@ from backend.database import DatabaseManager, SCHEMA_SQL  # noqa: E402
 def live_class(tmp_path, monkeypatch):
     database = DatabaseManager(str(tmp_path / "classtrack-test.db"))
     monkeypatch.setattr(dashboard, "db", database)
-    monkeypatch.setattr(dashboard, "EDGE_API_KEY", "test-edge-key")
     dashboard.edge_selected_section_id = None
-    dashboard.podium_queue.clear()
+    dashboard.queues.clear()
+    teacher = database.create_teacher("Test teacher", "", "TEACHER", "Test-password-2026", account_id="teacher_master")
     section = database.create_section("Test class", "Testing", "Room 1", teacher_id="teacher_master")
     seat = database.register_student(section["id"], "Student One", "S001")
-    token = dashboard._create_teacher_token()
+    token = dashboard._create_teacher_token(teacher)
     with TestClient(dashboard.app) as client:
         started = client.post(
             "/api/sessions/start",
@@ -34,7 +34,7 @@ def live_class(tmp_path, monkeypatch):
         )
         assert started.status_code == 201, started.text
         yield client, database, section, seat, token, started.json()
-    dashboard.podium_queue.clear()
+    dashboard.queues.clear()
 
 
 def event(section, seat, session, event_id, status="VALID", reason="VALID_HAND_RAISE", timestamp=1000):
@@ -56,9 +56,9 @@ def test_raise_is_saved_once_and_lower_releases_queue(live_class):
     ledger = client.get(f"/api/recitation/ledger?section_id={section['id']}", headers=teacher_headers).json()
     assert ledger[0]["total_raises"] == 1
     assert ledger[0]["latest_queue_pos"] == 1
-    dashboard.podium_queue.clear()
+    dashboard.queues.clear()
     dashboard._restore_live_queue()
-    assert dashboard.podium_queue.get_entry(seat["id"]).queue_position == 1
+    assert dashboard.session_queue(session["id"]).get_entry(seat["id"]).queue_position == 1
 
     award = client.post("/api/events/raise-one/award", headers=teacher_headers)
     assert award.status_code == 200, award.text
@@ -73,6 +73,72 @@ def test_raise_is_saved_once_and_lower_releases_queue(live_class):
     ledger = client.get(f"/api/recitation/ledger?section_id={section['id']}", headers=teacher_headers).json()
     assert ledger[0]["latest_queue_pos"] is None
     assert ledger[0]["total_raises"] == 1
+
+
+def test_camera_verification_metadata_reaches_ledger_and_mismatch_clears(live_class):
+    client, database, section, seat, token, session = live_class
+    headers = {"X-Teacher-Token": token}
+    mismatch = event(section, seat, session, "face-mismatch", "INVALID", "SEAT_MISMATCH")
+    mismatch.update(verification_status="SEAT_MISMATCH", face_similarity=.15)
+    assert client.post("/api/events/ingest", json=mismatch).status_code == 200
+    ledger = client.get(f"/api/recitation/ledger?section_id={section['id']}", headers=headers).json()
+    assert ledger[0]["verification_status"] == "SEAT_MISMATCH"
+    assert ledger[0]["face_similarity"] == pytest.approx(.15)
+    assert ledger[0]["latest_queue_pos"] is None
+    lower = event(section, seat, session, "face-mismatch-cleared", "IDLE", "NO_RAISE", 2000)
+    lower.update(verification_status="UNVERIFIED", face_similarity=0)
+    assert client.post("/api/events/ingest", json=lower).status_code == 200
+    ledger = client.get(f"/api/recitation/ledger?section_id={section['id']}", headers=headers).json()
+    assert ledger[0]["verification_status"] == "UNVERIFIED"
+
+
+def test_priority_uses_onset_and_stable_ties_after_delivery_and_restart(live_class):
+    client, database, section, first, token, session = live_class
+    second = database.register_student(section['id'], 'Student Two', 'S002')
+    third = database.register_student(section['id'], 'JM', 'S003')
+    # A later raise arrives first; the earlier observed raise must still win.
+    for seat, onset in [(third, 1120), (second, 1000), (first, 1000)]:
+        response = client.post('/api/events/ingest', json=event(section, seat, session, 'priority-' + seat['id'], timestamp=onset))
+        assert response.status_code == 200, response.text
+    expected = sorted([first['id'], second['id']]) + [third['id']]
+    queue = dashboard.session_queue(session['id'])
+    assert [entry.seat_id for entry in queue.get_podium()] == expected
+    assert [entry.delta_ms for entry in queue.get_podium()] == [0, 0, 120]
+    dashboard.queues.clear()
+    dashboard._restore_live_queue()
+    assert [entry.seat_id for entry in dashboard.session_queue(session['id']).get_podium()] == expected
+    ledger = client.get('/api/recitation/ledger', headers={'X-Teacher-Token': token}).json()
+    assert {row['seat_id']: row['latest_queue_pos'] for row in ledger} == {seat_id: i for i, seat_id in enumerate(expected, 1)}
+    winner = first if expected[0] == first['id'] else second
+    assert client.post('/api/events/ingest', json=event(section, winner, session, 'priority-lowered', 'IDLE', 'HAND_LOWERED', 2000)).status_code == 200
+    assert [entry.seat_id for entry in dashboard.session_queue(session['id']).get_podium()] == expected[1:]
+    assert [entry.queue_position for entry in dashboard.session_queue(session['id']).get_podium()] == [2, 3]
+
+
+def test_numbered_offers_keep_ordinals_after_first_lowers_and_dashboard_restarts(live_class):
+    client, database, section, first, token, session = live_class
+    second = database.register_student(section['id'], 'Student Two', 'S002')
+    third = database.register_student(section['id'], 'JM', 'S003')
+    students = [first, second, third]
+    for rank, seat in enumerate(students, 1):
+        payload = event(section, seat, session, 'ordinal-' + seat['id'], timestamp=1000 + rank*40)
+        payload.update(queue_pos=rank, delta_ms=(rank-1)*40)
+        assert client.post('/api/events/ingest', json=payload).status_code == 200
+    assert client.post('/api/events/ingest', json=event(section, first, session, 'ordinal-first-down', 'IDLE', 'HAND_LOWERED', 1500)).status_code == 200
+    assert [entry.queue_position for entry in dashboard.session_queue(session['id']).get_podium()] == [2, 3]
+    dashboard.queues.clear()
+    dashboard._restore_live_queue()
+    assert [entry.queue_position for entry in dashboard.session_queue(session['id']).get_podium()] == [2, 3]
+    ledger = client.get('/api/recitation/ledger', headers={'X-Teacher-Token': token}).json()
+    assert {row['seat_id']: row['latest_queue_pos'] for row in ledger} == {first['id']: None, second['id']: 2, third['id']: 3}
+    for seat in (second, third):
+        assert client.post('/api/events/ingest', json=event(section, seat, session, 'ordinal-down-' + seat['id'], 'IDLE', 'HAND_LOWERED', 1600)).status_code == 200
+    payload = event(section, third, session, 'new-question-jm', timestamp=2000)
+    payload.update(queue_pos=1, delta_ms=0)
+    assert client.post('/api/events/ingest', json=payload).status_code == 200
+    assert dashboard.session_queue(session['id']).get_entry(third['id']).queue_position == 1
+    ledger = client.get('/api/recitation/ledger', headers={'X-Teacher-Token': token}).json()
+    assert {row['seat_id']: row['total_raises'] for row in ledger} == {first['id']: 1, second['id']: 1, third['id']: 2}
 
 
 def test_stale_session_and_changed_student_are_rejected(live_class):
@@ -132,7 +198,8 @@ def test_reassigned_desk_does_not_keep_previous_student_raise(live_class):
     assert client.post(
         "/api/events/ingest", json=event(section, seat, session, "old-raise"), headers=edge_headers
     ).status_code == 200
-    database.register_student(section["id"], "Student Two", "S002", seat_id=seat["id"])
+    replacement = database.enroll_student(section["id"], "Student Two", "S002")
+    database.assign_student_to_seat(seat["id"], replacement["id"])
     assert client.get("/api/edge/status").json()["podium_active"] == 0
     ledger = client.get(f"/api/recitation/ledger?section_id={section['id']}", headers=teacher_headers).json()
     assert ledger[0]["student_name"] == "Student Two"

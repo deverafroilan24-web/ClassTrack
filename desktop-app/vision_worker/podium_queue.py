@@ -16,14 +16,16 @@ class PodiumEntry:
 
 class PodiumQueueManager:
     """
-    Sub-Frame Millisecond 'First-to-Raise' Podium Queue.
-    Maintains active queue rankings (Rank 1, Rank 2, Rank 3...) based on high-precision
-    timestamps (time.time_ns() // 1_000_000) assigned at the moment a raise is confirmed.
+    First-to-raise queue using the camera's first observed raise timestamps.
+    Same-frame ties use a stable seat ID, independent of geometry or insertion order.
+    Active offers retain their original question ordinals when earlier hands lower.
     """
 
     def __init__(self):
         # Maps seat_id -> PodiumEntry
         self._entries: Dict[str, PodiumEntry] = {}
+        self._round_entries: Dict[str, PodiumEntry] = {}
+        self._fixed_positions = {}
 
     def get_timestamp_ms(self) -> int:
         """High-precision millisecond timestamp."""
@@ -35,10 +37,12 @@ class PodiumQueueManager:
         student_name: str,
         arm_angle: float,
         timestamp_ms: Optional[int] = None,
+        queue_position: Optional[int] = None,
+        delta_ms: Optional[int] = None,
     ) -> PodiumEntry:
         """
         Registers a confirmed hand raise. If already in queue, returns current entry.
-        Otherwise, assigns high-precision timestamp and recalculates podium positions.
+        Camera question ordinals take precedence over active-hand list positions.
         """
         if seat_id in self._entries:
             return self._entries[seat_id]
@@ -55,14 +59,17 @@ class PodiumQueueManager:
             arm_angle=arm_angle,
         )
         self._entries[seat_id] = entry
+        self._round_entries[seat_id] = entry
+        if queue_position is not None:
+            self._fixed_positions[seat_id] = (queue_position, delta_ms or 0)
         self._recalculate()
         return self._entries[seat_id]
 
     def release_raise(self, seat_id: str) -> Optional[PodiumEntry]:
         """Removes a seat from the podium queue when hand is lowered."""
         removed = self._entries.pop(seat_id, None)
-        if removed is not None:
-            self._recalculate()
+        # Keep the departed student's place in this question. Do not promote
+        # remaining offers when a hand is lowered or temporarily disappears.
         return removed
 
     def get_entry(self, seat_id: str) -> Optional[PodiumEntry]:
@@ -75,15 +82,18 @@ class PodiumQueueManager:
     def clear(self) -> None:
         """Clears all active podium entries (e.g. at round reset)."""
         self._entries.clear()
+        self._round_entries.clear()
+        self._fixed_positions.clear()
 
     def _recalculate(self) -> None:
-        if not self._entries:
+        if not self._round_entries:
             return
 
-        # Sort entries by timestamp_ms ascending
-        sorted_entries = sorted(self._entries.values(), key=lambda e: e.timestamp_ms)
+        sorted_entries = sorted(self._round_entries.values(), key=lambda e: (e.timestamp_ms, e.seat_id))
         first_ts = sorted_entries[0].timestamp_ms
 
         for rank, entry in enumerate(sorted_entries, start=1):
             entry.queue_position = rank
             entry.delta_ms = max(0, entry.timestamp_ms - first_ts)
+            if entry.seat_id in self._fixed_positions:
+                entry.queue_position, entry.delta_ms = self._fixed_positions[entry.seat_id]

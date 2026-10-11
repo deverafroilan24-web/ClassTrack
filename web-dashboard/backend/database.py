@@ -1,6 +1,7 @@
 import csv
 import hashlib
 import io
+import json
 import os
 import re
 import secrets
@@ -88,25 +89,37 @@ CREATE INDEX IF NOT EXISTS idx_students_section ON students (section_id);
 """
 
 
+class SafeCsvWriter:
+    """Keep user-entered names/labels literal when opened in spreadsheet apps."""
+    def __init__(self, output):
+        self.writer = csv.writer(output)
+
+    def writerow(self, values):
+        self.writer.writerow([("'" + value if isinstance(value, str) and value.lstrip().startswith(('=', '+', '-', '@', '\t', '\r')) else value) for value in values])
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def verify_pin_hash(pin: str, stored: str) -> bool:
+def verify_password(password: str, stored: str) -> bool:
     try:
         algorithm, rounds, salt_hex, digest_hex = stored.split("$")
         if algorithm != "pbkdf2_sha256":
             return False
-        digest = hashlib.pbkdf2_hmac("sha256", pin.encode(), bytes.fromhex(salt_hex), int(rounds))
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt_hex), int(rounds))
         return secrets.compare_digest(digest, bytes.fromhex(digest_hex))
     except (ValueError, TypeError):
         return False
 
 
-def hash_pin(pin: str) -> str:
+def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", pin.encode(), salt, 200_000)
-    return f"pbkdf2_sha256$200000${salt.hex()}${digest.hex()}"
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600_000)
+    return f"pbkdf2_sha256$600000${salt.hex()}${digest.hex()}"
+
+
+DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
 
 
 class PgCursorWrapper:
@@ -177,7 +190,8 @@ class PgConnectionWrapper:
 
     def execute(self, sql: str, params: Optional[Any] = None) -> PgCursorWrapper:
         cur = self.conn.cursor()
-        converted = self._convert_query(sql)
+        # psycopg2 interprets literal percent signs when parameters are supplied.
+        converted = self._convert_query(sql.replace("%", "%%") if params is not None else sql)
         if params is not None:
             cur.execute(converted, params)
         else:
@@ -197,140 +211,269 @@ class PgConnectionWrapper:
 
 class DatabaseManager:
     def __init__(self, db_path: Optional[str] = None):
-        self.database_url = os.getenv("DATABASE_URL", "").strip()
+        mode = os.getenv("DATABASE_MODE", "auto").strip().lower()
+        if mode not in {"auto", "sqlite", "postgres"}:
+            raise ValueError("DATABASE_MODE must be auto, sqlite, or postgres")
+        self.database_url = "" if mode == "sqlite" else os.getenv("DATABASE_URL", "").strip()
+        if mode == "postgres" and not self.database_url:
+            raise ValueError("PostgreSQL mode requires DATABASE_URL; refusing to use a temporary SQLite database")
         if self.database_url:
+            if psycopg2 is None:
+                raise RuntimeError("PostgreSQL requires psycopg2; install dashboard requirements")
             print(f"[DatabaseManager] Using Supabase/PostgreSQL database via DATABASE_URL")
             self.is_postgres = True
         else:
-            print(f"[DatabaseManager] Using local SQLite database")
             self.is_postgres = False
-            self.db_path = Path(db_path or "hand_tracking.db")
+            self.db_path = Path(db_path or "hand_tracking.db").resolve()
+            print(f"[DatabaseManager] Using local SQLite database: {self.db_path}")
             if self.db_path.parent != Path("."):
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self.init_db()
         self.init_auth_schema()
+        if not self.is_postgres:
+            self.ensure_local_default_admin()
+
+    def ensure_local_default_admin(self):
+        """Provision the packaged local login once, without resetting accounts."""
+        with self._connect() as conn:
+            existing = conn.execute('SELECT id FROM "Admin" LIMIT 1').fetchone()
+        if existing:
+            return
+        self.save_admin('admin1', 'admin1234567', account_id='local_default_admin',
+                        name='Administrator')
 
     def init_auth_schema(self) -> None:
-        """Idempotent auth migration for both SQLite and PostgreSQL."""
-        timestamp_type = "TIMESTAMPTZ" if self.is_postgres else "TEXT"
-        pin = os.getenv("TEACHER_PIN") or "1234"
+        """Preserve accounts and ownership; retire all publicly exposed legacy PINs."""
         with self._connect() as conn:
-            if self.is_postgres:
-                conn.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS guest_code TEXT")
-                conn.execute("ALTER TABLE sections ADD COLUMN IF NOT EXISTS teacher_id TEXT")
-                conn.execute("ALTER TABLE events ADD COLUMN IF NOT EXISTS student_id TEXT")
-            else:
-                if "guest_code" not in {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}:
-                    conn.execute("ALTER TABLE sessions ADD COLUMN guest_code TEXT")
-                if "teacher_id" not in {row[1] for row in conn.execute("PRAGMA table_info(sections)")}:
-                    conn.execute("ALTER TABLE sections ADD COLUMN teacher_id TEXT")
-            for session in conn.execute("SELECT id FROM sessions WHERE ended_at IS NULL AND guest_code IS NULL").fetchall():
-                conn.execute("UPDATE sessions SET guest_code = ? WHERE id = ?",
-                             (secrets.token_hex(4).upper(), session["id"]))
-            conn.execute(
-                f"CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at {timestamp_type} NOT NULL)"
-            )
+            conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_section ON sessions(section_id)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS idempotency_requests (
+                scope TEXT NOT NULL, request_key TEXT NOT NULL, fingerprint TEXT NOT NULL,
+                response_json TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                PRIMARY KEY(scope, request_key))""")
             conn.execute("""CREATE TABLE IF NOT EXISTS teachers (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, pin TEXT UNIQUE,
                 department TEXT NOT NULL DEFAULT '', pin_hash TEXT,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 auth_version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
             )""")
+            additions = {
+                "sessions": {"guest_code": "TEXT", "owner_id": "TEXT"},
+                "sections": {"teacher_id": "TEXT"}, "events": {"student_id": "TEXT"},
+                "teachers": {"pin": "TEXT", "login_id": "TEXT", "password_hash": "TEXT",
+                             "is_admin": "INTEGER NOT NULL DEFAULT 0",
+                             "auth_version": "INTEGER NOT NULL DEFAULT 1"},
+            }
+            for table, columns in additions.items():
+                existing = set() if self.is_postgres else {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+                for column, kind in columns.items():
+                    if self.is_postgres or column not in existing:
+                        optional = "IF NOT EXISTS " if self.is_postgres else ""
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {optional}{column} {kind}")
             if self.is_postgres:
-                conn.execute("ALTER TABLE teachers ADD COLUMN IF NOT EXISTS pin TEXT")
                 conn.execute("ALTER TABLE teachers ALTER COLUMN pin_hash DROP NOT NULL")
-                conn.execute("ALTER TABLE teachers ALTER COLUMN is_active SET DEFAULT 1")
-                conn.execute("ALTER TABLE teachers ALTER COLUMN auth_version SET DEFAULT 1")
-                conn.execute("ALTER TABLE teachers ALTER COLUMN created_at SET DEFAULT NOW()")
-                conn.execute("ALTER TABLE teachers ALTER COLUMN id SET DEFAULT ('teacher_' || replace(gen_random_uuid()::text, '-', ''))")
-                conn.execute("ALTER TABLE teachers ADD COLUMN IF NOT EXISTS auth_version INTEGER NOT NULL DEFAULT 1")
-                conn.execute("ALTER TABLE teachers ENABLE ROW LEVEL SECURITY")
-                conn.execute("REVOKE ALL ON TABLE teachers FROM anon, authenticated")
-            else:
-                if "pin" not in {row[1] for row in conn.execute("PRAGMA table_info(teachers)")}:
-                    conn.execute("ALTER TABLE teachers ADD COLUMN pin TEXT")
-                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_teachers_pin_unique ON teachers(pin) WHERE pin IS NOT NULL")
-            # Preserve the existing sample accounts and section ownership during the
-            # migration. New teacher accounts are managed only through the database.
-            legacy = [
-                ("teacher_1234", "Teacher Froilan", "Information Technology", "1234"),
-                ("teacher_4321", "Teacher Leonard", "Computer Science", "4321"),
-                ("teacher_1111", "Teacher Santos", "Engineering", "1111"),
-                ("teacher_2222", "Teacher Garcia", "General Education", "2222"),
-            ]
-            # Migrate each legacy account independently. ON CONFLICT preserves
-            # existing names, PIN changes, and deactivation state on later startups.
-            for teacher_id, name, department, teacher_pin in legacy:
-                conn.execute("UPDATE teachers SET pin = ? WHERE id = ? AND pin IS NULL",
-                             (teacher_pin, teacher_id))
-                conn.execute(
-                    "INSERT INTO teachers (id, name, department, pin, pin_hash, is_active, auth_version, created_at) VALUES (?, ?, ?, ?, ?, 1, 1, ?) ON CONFLICT (id) DO NOTHING",
-                    (teacher_id, name, department, teacher_pin, hash_pin(teacher_pin), _now_iso()),
-                )
-            existing = conn.execute("SELECT value FROM app_settings WHERE key = ?", ("teacher_pin_hash",)).fetchone()
-            if existing and (not os.getenv("TEACHER_PIN") or verify_pin_hash(pin, existing["value"])):
-                return
-            pin_hash = hash_pin(pin)
-            if existing:
-                conn.execute("UPDATE app_settings SET value = ?, updated_at = ? WHERE key = ?",
-                             (pin_hash, _now_iso(), "teacher_pin_hash"))
-            else:
-                conn.execute("INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO NOTHING",
-                             ("teacher_pin_hash", pin_hash, _now_iso()))
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sections_teacher ON sections(teacher_id)")
+            conn.execute("UPDATE teachers SET login_id = UPPER(id) WHERE login_id IS NULL")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_teacher_login ON teachers(login_id)")
+            migrated = conn.execute("SELECT value FROM app_settings WHERE key = 'password_login_v1'").fetchone()
+            if not migrated:
+                conn.execute("UPDATE teachers SET pin = NULL, pin_hash = NULL, auth_version = auth_version + 1")
+                conn.execute("DELETE FROM app_settings WHERE key = 'teacher_pin_hash'")
+                conn.execute("INSERT INTO app_settings(key, value, updated_at) VALUES ('password_login_v1', '1', ?)", (_now_iso(),))
+            conn.execute("UPDATE sessions SET owner_id = COALESCE((SELECT teacher_id FROM sections WHERE sections.id = sessions.section_id), 'teacher_master') WHERE owner_id IS NULL")
+            conn.execute('''CREATE TABLE IF NOT EXISTS "Admin" (
+                id TEXT PRIMARY KEY, login_id TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL, email TEXT UNIQUE, password_hash TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                auth_version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+            )''')
+            # Keep legacy ownership identities, but move credentials out of teachers.
+            migrated_admin = conn.execute("SELECT value FROM app_settings WHERE key = 'admin_table_v1'").fetchone()
+            if not migrated_admin:
+                for admin in conn.execute("SELECT * FROM teachers WHERE is_admin = 1").fetchall():
+                    conn.execute('''INSERT INTO "Admin"
+                        (id, login_id, name, email, password_hash, is_active, auth_version, created_at)
+                        VALUES (?, ?, ?, NULL, ?, ?, ?, ?)''',
+                        (admin['id'], admin['login_id'], admin['name'], admin['password_hash'],
+                         admin['is_active'], admin['auth_version'] + 1, admin['created_at']))
+                conn.execute("UPDATE teachers SET password_hash = NULL, pin = NULL, pin_hash = NULL, is_active = 0, auth_version = auth_version + 1 WHERE is_admin = 1")
+                conn.execute("INSERT INTO app_settings(key, value, updated_at) VALUES ('admin_table_v1', '1', ?)", (_now_iso(),))
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_active_owner ON sessions(owner_id) WHERE ended_at IS NULL")
+            for session in conn.execute("SELECT id FROM sessions WHERE ended_at IS NULL AND guest_code IS NULL").fetchall():
+                conn.execute("UPDATE sessions SET guest_code = ? WHERE id = ?", (secrets.token_hex(4).upper(), session['id']))
+            # A reservation table enforces normalized uniqueness, including concurrent
+            # requests, without deleting historical duplicate student records.
+            conn.execute("""CREATE TABLE IF NOT EXISTS student_identity_keys (
+                section_id TEXT NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+                identity_key TEXT NOT NULL, PRIMARY KEY(section_id, identity_key))""")
+            for row in conn.execute("SELECT section_id, name, student_id_number FROM students").fetchall():
+                if row['section_id']:
+                    key = self._student_key(row['name'], row['student_id_number'])
+                    conn.execute("INSERT INTO student_identity_keys VALUES (?, ?) ON CONFLICT DO NOTHING", (row['section_id'], key))
 
-    def get_setting(self, key: str) -> Optional[str]:
+            if self.is_postgres:
+                # Direct backend connections own these tables. Supabase browser
+                # roles must not bypass the application's ownership checks.
+                roles = {r['rolname'] for r in conn.execute("SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated')").fetchall()}
+                for table in ('"Admin"', 'teachers', 'student_identity_keys', 'idempotency_requests', 'app_settings', 'students', 'sections', 'seats', 'sessions', 'events'):
+                    conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+                    for role in roles:
+                        conn.execute(f"REVOKE ALL ON TABLE {table} FROM {role}")
+
+    @staticmethod
+    def _student_key(name, number):
+        return 'id:' + ''.join(number.split()).casefold() if number.strip() else 'name:' + ' '.join(name.split()).casefold()
+
+    def _reserve_student(self, conn, section_id, name, number):
+        key = self._student_key(name, number)
+        result = conn.execute("INSERT INTO student_identity_keys VALUES (?, ?) ON CONFLICT DO NOTHING", (section_id, key))
+        if result.rowcount == 0:
+            raise ValueError("A student with this ID is already enrolled in this section")
+
+    @staticmethod
+    def request_fingerprint(payload):
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                                         ensure_ascii=False).encode()).hexdigest()
+
+    def _claim_request(self, conn, scope, key, fingerprint):
+        """Claim within the write transaction; a competing writer waits for commit.
+
+        The record and the created resource commit together, including across
+        processes/restarts. Failure rolls both back, allowing a safe retry.
+        """
+        if not key:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", key):
+            raise ValueError("Idempotency-Key must contain 1–128 letters, digits, dots, colons, underscores or hyphens")
+        claimed = conn.execute("""INSERT INTO idempotency_requests
+            (scope, request_key, fingerprint, created_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(scope, request_key) DO NOTHING""", (scope, key, fingerprint, _now_iso()))
+        if claimed.rowcount:
+            return None
+        saved = conn.execute("SELECT fingerprint, response_json FROM idempotency_requests WHERE scope = ? AND request_key = ?",
+                             (scope, key)).fetchone()
+        if saved['fingerprint'] != fingerprint:
+            raise ValueError("Idempotency-Key was already used with different request data")
+        return json.loads(saved['response_json'])
+
+    @staticmethod
+    def _complete_request(conn, scope, key, response):
+        if key:
+            conn.execute("UPDATE idempotency_requests SET response_json = ? WHERE scope = ? AND request_key = ?",
+                         (json.dumps(response, separators=(",", ":")), scope, key))
+
+    def get_setting(self, key):
         with self._connect() as conn:
             row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
-            return row["value"] if row else None
+            return row['value'] if row else None
 
-    def list_teachers(self) -> List[Dict[str, Any]]:
+    def list_teachers(self):
         with self._connect() as conn:
-            rows = conn.execute("SELECT id, name, department, is_active, created_at FROM teachers ORDER BY name").fetchall()
-            return [dict(row) for row in rows]
+            return [dict(r) for r in conn.execute("SELECT id, login_id, name, department, is_active, is_admin, created_at, CASE WHEN password_hash IS NOT NULL THEN 1 ELSE 0 END AS has_password FROM teachers WHERE is_admin = 0 AND (is_active = 1 OR password_hash IS NOT NULL) ORDER BY name").fetchall()]
 
-    def get_available_teacher_keys(self) -> List[Dict[str, str]]:
-        """Return active teacher names and PINs for the login help list."""
+    def get_teacher(self, teacher_id):
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT name, pin FROM teachers WHERE is_active = 1 AND pin IS NOT NULL AND pin <> '' ORDER BY name"
-            ).fetchall()
-            return [{"name": row["name"], "pin": row["pin"]} for row in rows]
-
-    def get_teacher_by_pin(self, pin: str) -> Optional[Dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT id, name, department, pin, pin_hash, auth_version FROM teachers WHERE is_active = 1").fetchall()
-        for row in rows:
-            if (row.get("pin") if isinstance(row, dict) else row["pin"]) == pin or verify_pin_hash(pin, row["pin_hash"]):
-                return {"id": row["id"], "name": row["name"], "department": row["department"],
-                        "auth_version": row["auth_version"]}
-        return None
-
-    def get_teacher(self, teacher_id: str) -> Optional[Dict[str, Any]]:
-        with self._connect() as conn:
-            row = conn.execute("SELECT id, name, department, is_active, auth_version FROM teachers WHERE id = ?",
-                               (teacher_id,)).fetchone()
+            row = conn.execute("SELECT id, login_id, name, department, is_active, is_admin, auth_version FROM teachers WHERE id = ?", (teacher_id,)).fetchone()
             return dict(row) if row else None
 
-    def create_teacher(self, name: str, department: str, pin: str) -> Dict[str, Any]:
-        # Ensure a PIN cannot identify two accounts.
+    def get_admin(self, admin_id):
         with self._connect() as conn:
-            existing = conn.execute("SELECT pin, pin_hash FROM teachers").fetchall()
-            if any((row.get("pin") if isinstance(row, dict) else row["pin"]) == pin or verify_pin_hash(pin, row["pin_hash"])
-                   for row in existing):
-                raise ValueError("That teacher code is already assigned")
-            teacher = {"id": f"teacher_{uuid.uuid4().hex[:12]}", "name": name.strip(),
-                       "department": department.strip(), "is_active": 1, "created_at": _now_iso()}
-            conn.execute(
-                "INSERT INTO teachers (id, name, department, pin, pin_hash, is_active, auth_version, created_at) VALUES (?, ?, ?, ?, ?, 1, 1, ?)",
-                (teacher["id"], teacher["name"], teacher["department"], pin, hash_pin(pin), teacher["created_at"]),
-            )
-        return teacher
+            row = conn.execute('''SELECT id, login_id, name, email, is_active,
+                auth_version, 1 AS is_admin FROM "Admin" WHERE id = ?''', (admin_id,)).fetchone()
+            return dict(row) if row else None
 
-    def set_teacher_active(self, teacher_id: str, active: bool) -> bool:
+    def save_admin(self, login_id, password, email=None, *, account_id='teacher_master', name='Administrator'):
+        login_id = login_id.strip().upper()
+        if not re.fullmatch(r'[A-Z0-9._/-]{1,64}', login_id):
+            raise ValueError('Administrator ID must contain 1–64 letters, digits, dots, hyphens, slashes or underscores.')
+        if not 12 <= len(password) <= 128 or len(set(password)) < 4 or not password.strip():
+            raise ValueError('Choose a varied password of 12–128 characters.')
+        if email is not None:
+            email = email.strip().lower()
+            if len(email) > 254 or not re.fullmatch(r'[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+', email):
+                raise ValueError('Enter a valid administrator email address.')
         with self._connect() as conn:
-            cursor = conn.execute("UPDATE teachers SET is_active = ?, auth_version = auth_version + 1 WHERE id = ?",
-                                  (1 if active else 0, teacher_id))
-            return cursor.rowcount > 0
+            if conn.execute('SELECT id FROM teachers WHERE login_id = ? AND is_admin = 0', (login_id,)).fetchone():
+                raise ValueError('That ID belongs to a teacher.')
+            if conn.execute('SELECT id FROM "Admin" WHERE (login_id = ? OR email = ?) AND id <> ?', (login_id, email, account_id)).fetchone():
+                raise ValueError('That administrator ID or email is already registered.')
+            conn.execute('''INSERT INTO "Admin"
+                (id, login_id, name, email, password_hash, is_active, auth_version, created_at)
+                VALUES (?, ?, ?, ?, ?, 1, 1, ?)
+                ON CONFLICT(id) DO UPDATE SET login_id = excluded.login_id,
+                name = excluded.name, email = COALESCE(excluded.email, "Admin".email),
+                password_hash = excluded.password_hash, is_active = 1,
+                auth_version = "Admin".auth_version + 1''',
+                (account_id, login_id, name, email, hash_password(password), _now_iso()))
+        return self.get_admin(account_id)
+
+    def authenticate_account(self, login_id, password):
+        with self._connect() as conn:
+            row = conn.execute('SELECT * FROM "Admin" WHERE login_id = ?', (login_id.strip().upper(),)).fetchone()
+        if row:
+            stored = row['password_hash'] or DUMMY_PASSWORD_HASH
+            if self.is_postgres and stored.startswith('$2a$'):
+                # Supabase Table Editor hashes new admin passwords using pgcrypto.
+                # Enforce bcrypt's byte limit on verification as well as creation.
+                if len(password.encode('utf-8')) > 72 or '\x00' in password:
+                    return None
+                with self._connect() as conn:
+                    valid = conn.execute('SELECT extensions.crypt(?, ?) = ? AS valid',
+                                         (password, stored, stored)).fetchone()['valid']
+            else:
+                valid = verify_password(password, stored)
+            return self.get_admin(row['id']) if valid and row['is_active'] and row['password_hash'] else None
+        return self.authenticate_teacher(login_id, password)
+
+    def authenticate_teacher(self, login_id, password):
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM teachers WHERE login_id = ? AND is_admin = 0", (login_id.strip().upper(),)).fetchone()
+        # Perform a password derivation even for unknown IDs.
+        stored = row['password_hash'] if row and row['password_hash'] else DUMMY_PASSWORD_HASH
+        valid = verify_password(password, stored)
+        return self.get_teacher(row['id']) if row and row['is_active'] and valid and row['password_hash'] else None
+
+    def create_teacher(self, name, department, login_id, password, *, is_admin=False, account_id=None):
+        if is_admin:
+            return self.save_admin(login_id, password, account_id=account_id or f"admin_{uuid.uuid4().hex}", name=name)
+        teacher_id = account_id or f"teacher_{uuid.uuid4().hex}"
+        with self._connect() as conn:
+            if conn.execute('SELECT id FROM "Admin" WHERE login_id = ?', (login_id.strip().upper(),)).fetchone():
+                raise ValueError('That ID belongs to an administrator.')
+            result = conn.execute("""INSERT INTO teachers
+                (id, login_id, name, department, password_hash, is_active, is_admin, auth_version, created_at)
+                VALUES (?, ?, ?, ?, ?, 1, ?, 1, ?) ON CONFLICT DO NOTHING""",
+                (teacher_id, login_id.strip().upper(), name.strip(), department.strip(), hash_password(password), int(is_admin), _now_iso()))
+            if result.rowcount == 0:
+                raise ValueError("That teacher ID is already registered")
+        return self.get_teacher(teacher_id)
+
+    def update_teacher(self, teacher_id, name, department, login_id, password=None, is_active=True):
+        with self._connect() as conn:
+            if conn.execute('SELECT id FROM "Admin" WHERE login_id = ?', (login_id.strip().upper(),)).fetchone():
+                raise ValueError('That ID belongs to an administrator.')
+            duplicate = conn.execute("SELECT id FROM teachers WHERE login_id = ? AND id <> ?", (login_id.strip().upper(), teacher_id)).fetchone()
+            if duplicate:
+                raise ValueError("That teacher ID is already registered")
+            result = conn.execute("""UPDATE teachers SET name = ?, department = ?, login_id = ?,
+                password_hash = COALESCE(?, password_hash), is_active = ?, auth_version = auth_version + 1
+                WHERE id = ? AND is_admin = 0""",
+                (name, department, login_id.strip().upper(), hash_password(password) if password else None, int(is_active), teacher_id))
+            if not result.rowcount:
+                raise KeyError(teacher_id)
+        return self.get_teacher(teacher_id)
+
+    def set_teacher_active(self, teacher_id, active):
+        with self._connect() as conn:
+            return conn.execute("UPDATE teachers SET is_active = ?, auth_version = auth_version + 1 WHERE id = ? AND is_admin = 0", (int(active), teacher_id)).rowcount > 0
+
+    def delete_teacher(self, teacher_id):
+        # Retain the identity/ownership tombstone for historical class records.
+        with self._connect() as conn:
+            result = conn.execute("""UPDATE teachers SET is_active = 0, password_hash = NULL,
+                auth_version = auth_version + 1 WHERE id = ? AND is_admin = 0""", (teacher_id,))
+            conn.execute("UPDATE sessions SET ended_at = ? WHERE owner_id = ? AND ended_at IS NULL", (_now_iso(), teacher_id))
+            return result.rowcount > 0
 
     @contextmanager
     def _connect(self, foreign_keys: bool = True):
@@ -339,9 +482,13 @@ class DatabaseManager:
                 self.database_url,
                 cursor_factory=psycopg2.extras.RealDictCursor,
             )
-            conn.autocommit = True
+            conn.autocommit = False
             try:
                 yield PgConnectionWrapper(conn)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
             finally:
                 conn.close()
         else:
@@ -424,34 +571,39 @@ class DatabaseManager:
     def get_sections(self, teacher_id: Optional[str] = None) -> List[Dict[str, Any]]:
         with self._connect() as conn:
             query = """
-                SELECT 
+                SELECT
                     sec.id, sec.name, sec.subject, sec.room, sec.created_at, sec.teacher_id,
-                    COUNT(DISTINCT s.id) as student_count,
-                    COUNT(DISTINCT sess.id) as session_count
+                    (SELECT COUNT(*) FROM seats s WHERE s.section_id = sec.id) as student_count,
+                    (SELECT COUNT(*) FROM sessions sess WHERE sess.section_id = sec.id) as session_count
                 FROM sections sec
-                LEFT JOIN seats s ON sec.id = s.section_id
-                LEFT JOIN sessions sess ON sec.id = sess.section_id
             """
             params = ()
             if teacher_id:
                 query += " WHERE COALESCE(sec.teacher_id, 'teacher_master') = ? "
                 params = (teacher_id,)
             query += """
-                GROUP BY sec.id
                 ORDER BY sec.name ASC
             """
             cursor = conn.execute(query, params)
             return [dict(r) for r in cursor.fetchall()]
 
-    def create_section(self, name: str, subject: str, room: str, teacher_id: Optional[str] = None) -> Dict[str, Any]:
-        sec_id = f"sec_{int(time.time())}_{uuid.uuid4().hex[:4]}"
+    def create_section(self, name: str, subject: str, room: str, teacher_id: Optional[str] = None,
+                       idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        sec_id = f"sec_{uuid.uuid4().hex}"
         now = _now_iso()
+        scope = f"create-section:{teacher_id or 'teacher_master'}"
+        fingerprint = self.request_fingerprint({"name": name, "subject": subject, "room": room})
         with self._connect() as conn:
+            replay = self._claim_request(conn, scope, idempotency_key, fingerprint)
+            if replay is not None:
+                return replay
             conn.execute(
                 "INSERT INTO sections (id, name, subject, room, created_at, teacher_id) VALUES (?, ?, ?, ?, ?, ?)",
                 (sec_id, name, subject, room, now, teacher_id),
             )
-        return {"id": sec_id, "name": name, "subject": subject, "room": room, "created_at": now, "teacher_id": teacher_id}
+            result = {"id": sec_id, "name": name, "subject": subject, "room": room, "created_at": now, "teacher_id": teacher_id}
+            self._complete_request(conn, scope, idempotency_key, result)
+            return result
 
     def get_section_owner(self, section_id: Optional[str]) -> Optional[str]:
         if not section_id:
@@ -468,6 +620,7 @@ class DatabaseManager:
             conn.execute("DELETE FROM sessions WHERE section_id = ?", (section_id,))
             conn.execute("DELETE FROM seats WHERE section_id = ?", (section_id,))
             conn.execute("DELETE FROM students WHERE section_id = ?", (section_id,))
+            conn.execute("DELETE FROM student_identity_keys WHERE section_id = ?", (section_id,))
             conn.execute("DELETE FROM sections WHERE id = ?", (section_id,))
         return True
 
@@ -480,10 +633,35 @@ class DatabaseManager:
         face_embedding: str = "",
         assign_to_seat_id: Optional[str] = None,
         auto_create_desk: bool = False,
+        idempotency_key: Optional[str] = None,
+        request_fingerprint: Optional[str] = None,
     ) -> Dict[str, Any]:
+        name = " ".join(name.split())
+        student_id_number = student_id_number.strip().upper()
         student_id = f"stud_{uuid.uuid4().hex[:8]}"
         now = _now_iso()
+        scope = f"enroll-student:{section_id}"
+        fingerprint = request_fingerprint or self.request_fingerprint({
+            "name": name, "student_id_number": student_id_number, "photo_path": photo_path,
+            "face_embedding": face_embedding, "assign_to_seat_id": assign_to_seat_id,
+            "auto_create_desk": auto_create_desk})
         with self._connect() as conn:
+            if not self.is_postgres:
+                # Acquire the write lock before reading a desk; concurrent
+                # enrollments cannot both select the same empty desk.
+                conn.execute("BEGIN IMMEDIATE")
+            replay = self._claim_request(conn, scope, idempotency_key, fingerprint)
+            if replay is not None:
+                return replay
+            # Serialize enrollment within a section before claiming or appending a desk.
+            lock = " FOR UPDATE" if self.is_postgres else ""
+            if not conn.execute("SELECT id FROM sections WHERE id = ?" + lock, (section_id,)).fetchone():
+                raise ValueError("Section not found")
+            self._reserve_student(conn, section_id, name, student_id_number)
+            if assign_to_seat_id:
+                seat = conn.execute("SELECT id FROM seats WHERE id = ? AND section_id = ? AND student_id IS NULL", (assign_to_seat_id, section_id)).fetchone()
+                if not seat:
+                    raise ValueError("Select an empty desk in this section")
             conn.execute(
                 """
                 INSERT INTO students (id, section_id, name, student_id_number, photo_path, face_embedding, created_at)
@@ -503,14 +681,10 @@ class DatabaseManager:
                     (student_id, name, student_id_number, assign_to_seat_id),
                 )
             elif auto_create_desk:
-                # Find current maximum seat count or empty seats
-                cursor = conn.execute("SELECT COUNT(*) as cnt FROM seats WHERE section_id = ?", (section_id,))
-                cur_count = cursor.fetchone()["cnt"]
-                
                 # Check if there is an existing empty seat to claim first
                 empty_cursor = conn.execute(
-                    "SELECT id FROM seats WHERE section_id = ? AND (student_id IS NULL OR student_name LIKE 'Empty%') ORDER BY grid_row ASC, grid_col ASC LIMIT 1",
-                    (section_id,)
+                    "SELECT id FROM seats WHERE section_id = ? AND student_id IS NULL AND (student_name = '' OR student_name LIKE ?) ORDER BY grid_row ASC, grid_col ASC LIMIT 1",
+                    (section_id, 'Empty%')
                 )
                 first_empty = empty_cursor.fetchone()
                 if first_empty:
@@ -526,15 +700,17 @@ class DatabaseManager:
                     )
                 else:
                     # Dynamically append a new seat
-                    import math
-                    new_idx = cur_count + 1
-                    cols = max(3, math.ceil(math.sqrt(new_idx)))
-                    r = (new_idx - 1) // cols
-                    c = (new_idx - 1) % cols
+                    positions = conn.execute("SELECT grid_row, grid_col FROM seats WHERE section_id = ?", (section_id,)).fetchall()
+                    occupied = {(p['grid_row'], p['grid_col']) for p in positions}
+                    cols = max(3, max((p['grid_col'] + 1 for p in positions), default=3))
+                    index = 0
+                    while divmod(index, cols) in occupied:
+                        index += 1
+                    r, c = divmod(index, cols)
                     row_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
                     row_label = row_letters[r] if r < len(row_letters) else f"R{r+1}"
                     label = f"Desk {row_label}{c+1}"
-                    seat_id = f"seat_{section_id}_{row_label}{c+1}"
+                    seat_id = f"seat_{uuid.uuid4().hex}"
 
                     col_w = 1.0 / max(cols, 1)
                     row_h = 1.0 / max(r + 1, 1)
@@ -552,7 +728,9 @@ class DatabaseManager:
                     )
 
             cursor = conn.execute("SELECT * FROM students WHERE id = ?", (student_id,))
-            return dict(cursor.fetchone())
+            result = dict(cursor.fetchone())
+            self._complete_request(conn, scope, idempotency_key, result)
+            return result
 
     def get_students(self, section_id: Optional[str] = None) -> List[Dict[str, Any]]:
         with self._connect() as conn:
@@ -566,7 +744,7 @@ class DatabaseManager:
                     COALESCE(SUM(CASE WHEN e.earned_point = 1 THEN 1 ELSE 0 END), 0) as total_points,
                     COALESCE(SUM(CASE WHEN e.status = 'VALID' AND e.reason_code = 'VALID_HAND_RAISE' THEN 1 ELSE 0 END), 0) as total_raises
                 FROM students st
-                LEFT JOIN seats s ON (st.id = s.student_id OR (s.student_id IS NULL AND s.student_name = st.name))
+                LEFT JOIN seats s ON s.section_id = st.section_id AND (st.id = s.student_id OR (s.student_id IS NULL AND s.student_name = st.name))
                 LEFT JOIN events e ON (e.student_id = st.id OR (e.student_id IS NULL AND e.student_name = st.name))
                     AND e.session_id IN (SELECT id FROM sessions WHERE section_id = st.section_id)
             """
@@ -603,7 +781,13 @@ class DatabaseManager:
                 """,
                 (student_id,),
             )
+            student = conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
             conn.execute("DELETE FROM students WHERE id = ?", (student_id,))
+            if student:
+                key = self._student_key(student['name'], student['student_id_number'])
+                remaining = conn.execute("SELECT name, student_id_number FROM students WHERE section_id = ?", (student['section_id'],)).fetchall()
+                if not any(self._student_key(r['name'], r['student_id_number']) == key for r in remaining):
+                    conn.execute("DELETE FROM student_identity_keys WHERE section_id = ? AND identity_key = ?", (student['section_id'], key))
         return True
 
     def register_student(
@@ -616,26 +800,17 @@ class DatabaseManager:
         photo_path: str = "",
         face_embedding: str = "",
     ) -> Dict[str, Any]:
+        student_name = " ".join(student_name.split())
+        student_id_number = student_id_number.strip().upper()
         with self._connect() as conn:
-            cursor = conn.execute(
-                "SELECT id FROM students WHERE name = ? AND section_id = ?",
-                (student_name, section_id),
-            )
-            stud = cursor.fetchone()
-            if stud:
-                stud_id = stud["id"]
-                conn.execute(
-                    "UPDATE students SET student_id_number = ?, photo_path = COALESCE(NULLIF(?, ''), photo_path), face_embedding = COALESCE(NULLIF(?, ''), face_embedding) WHERE id = ?",
-                    (student_id_number, photo_path, face_embedding, stud_id),
-                )
-            else:
-                stud_id = f"stud_{uuid.uuid4().hex[:8]}"
-                conn.execute(
-                    "INSERT INTO students (id, section_id, name, student_id_number, photo_path, face_embedding, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (stud_id, section_id, student_name, student_id_number, photo_path, face_embedding, _now_iso()),
-                )
-
+            self._reserve_student(conn, section_id, student_name, student_id_number)
+            stud_id = f"stud_{uuid.uuid4().hex}"
+            conn.execute("INSERT INTO students (id, section_id, name, student_id_number, photo_path, face_embedding, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                         (stud_id, section_id, student_name, student_id_number, photo_path, face_embedding, _now_iso()))
             if seat_id:
+                target = conn.execute("SELECT student_id FROM seats WHERE id = ? AND section_id = ?", (seat_id, section_id)).fetchone()
+                if not target or target['student_id']:
+                    raise ValueError('Select an empty desk in this section')
                 # Update existing seat
                 conn.execute(
                     """
@@ -671,10 +846,13 @@ class DatabaseManager:
         started_at = _now_iso()
         guest_code = secrets.token_hex(4).upper()
         with self._connect() as conn:
-            conn.execute("UPDATE sessions SET ended_at = ? WHERE ended_at IS NULL", (started_at,))
+            owner = conn.execute("SELECT teacher_id FROM sections WHERE id = ?", (section_id,)).fetchone()
+            owner_id = (owner['teacher_id'] if owner else None) or 'teacher_master'
+            if conn.execute("SELECT id FROM sessions WHERE owner_id = ? AND ended_at IS NULL", (owner_id,)).fetchone():
+                raise ValueError("End your active session before starting another")
             conn.execute(
-                "INSERT INTO sessions (id, title, section_id, started_at, ended_at, guest_code) VALUES (?, ?, ?, ?, NULL, ?)",
-                (session_id, title, section_id, started_at, guest_code),
+                "INSERT INTO sessions (id, title, section_id, started_at, ended_at, guest_code, owner_id) VALUES (?, ?, ?, ?, NULL, ?, ?)",
+                (session_id, title, section_id, started_at, guest_code, owner_id),
             )
         return {"id": session_id, "title": title, "section_id": section_id, "started_at": started_at, "ended_at": None,
                 "guest_code": guest_code}
@@ -697,15 +875,20 @@ class DatabaseManager:
                 return dict(row)
         return None
 
-    def get_active_session(self, teacher_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def get_active_session(self, teacher_id: Optional[str] = None, section_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:
             cursor = conn.execute(
                 "SELECT s.* FROM sessions s LEFT JOIN sections sec ON sec.id = s.section_id "
                 "WHERE s.ended_at IS NULL AND (? IS NULL OR COALESCE(sec.teacher_id, 'teacher_master') = ?) "
-                "ORDER BY s.started_at DESC LIMIT 1",
-                (teacher_id, teacher_id),
+                "AND (? IS NULL OR s.section_id = ?) ORDER BY s.started_at DESC LIMIT 1",
+                (teacher_id, teacher_id, section_id, section_id),
             )
             row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_session_by_guest_code(self, code):
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM sessions WHERE guest_code = ? AND ended_at IS NULL", (code,)).fetchone()
             return dict(row) if row else None
 
     def get_sessions(
@@ -827,7 +1010,7 @@ class DatabaseManager:
                     COALESCE(st.student_id_number, s.student_id_number) as student_id_number,
                     COALESCE(s.student_id, st.id, (
                         SELECT st2.id FROM students st2 
-                        WHERE (st2.section_id = s.section_id OR s.section_id IS NULL) 
+                        WHERE st2.section_id = s.section_id
                           AND st2.name = s.student_name 
                         LIMIT 1
                     )) as student_id,
@@ -839,7 +1022,7 @@ class DatabaseManager:
                     s.is_present,
                     COALESCE(SUM(CASE WHEN e.earned_point = 1 THEN 1 ELSE 0 END), 0) as total_points
                 FROM seats s
-                LEFT JOIN students st ON (s.student_id = st.id OR (s.student_id IS NULL AND s.student_name = st.name))
+                LEFT JOIN students st ON st.section_id = s.section_id AND (s.student_id = st.id OR (s.student_id IS NULL AND s.student_name = st.name))
                 LEFT JOIN events e ON s.id = e.seat_id
                     AND (e.student_id = s.student_id OR (e.student_id IS NULL AND e.student_name = COALESCE(st.name, s.student_name)))
             """
@@ -956,8 +1139,8 @@ class DatabaseManager:
             else:
                 cursor = conn.execute("SELECT * FROM students WHERE id = ?", (student_id,))
                 stud = cursor.fetchone()
-                if not stud:
-                    raise ValueError(f"Student {student_id} not found")
+                if not stud or stud["section_id"] != sec_id:
+                    raise ValueError("Student not found in this section")
 
                 # If student is already assigned to another seat in same section, unassign the other seat
                 conn.execute(
@@ -1350,6 +1533,12 @@ class DatabaseManager:
         active_session_required: bool = False,
         active_podium_map: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
+        if session_id and not section_id:
+            with self._connect() as conn:
+                session = conn.execute("SELECT section_id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if not session:
+                return []
+            section_id = session['section_id']
         seats = self.get_seats(section_id=section_id)
 
         # If no session is started and active session is required, return idle 0 counts
@@ -1562,14 +1751,14 @@ class DatabaseManager:
             LEFT JOIN events e ON s.id = e.seat_id
                 AND (e.student_id = s.student_id OR (e.student_id IS NULL AND e.student_name = s.student_name))
                 AND (? IS NULL OR e.session_id = ?)
-            WHERE (? IS NULL OR s.section_id = ? OR s.section_id IS NULL)
+            WHERE (? IS NULL OR s.section_id = ?)
             GROUP BY s.id, s.label, s.student_name, s.student_id_number, s.is_present ORDER BY s.label ASC
             """
             cursor = conn.execute(query, (session_id, session_id, section_id, section_id))
             rows = cursor.fetchall()
 
         output = io.StringIO()
-        writer = csv.writer(output)
+        writer = SafeCsvWriter(output)
         writer.writerow([
             "Seat ID",
             "Seat Label",
@@ -1597,7 +1786,7 @@ class DatabaseManager:
     def export_class_report_csv(self, section_id: Optional[str] = None) -> str:
         ledger = self.get_recitation_ledger(section_id=section_id)
         output = io.StringIO()
-        writer = csv.writer(output)
+        writer = SafeCsvWriter(output)
         writer.writerow(["Class Participation Report"])
         writer.writerow(["Generated At:", _now_iso()])
         writer.writerow([])

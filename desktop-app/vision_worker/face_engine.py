@@ -22,8 +22,9 @@ class FaceEngine:
         nms_threshold: float = 0.30,
         match_threshold: float = 0.55,
     ):
-        self.yunet_path = Path(yunet_model_path)
-        self.sface_path = Path(sface_model_path)
+        from config import resolve_model_path
+        self.yunet_path = Path(resolve_model_path(yunet_model_path))
+        self.sface_path = Path(resolve_model_path(sface_model_path))
         self.score_threshold = score_threshold
         self.nms_threshold = nms_threshold
         self.match_threshold = match_threshold
@@ -49,7 +50,7 @@ class FaceEngine:
         )
 
     def extract_face_and_embedding(
-        self, bgr_image: np.ndarray
+        self, bgr_image: np.ndarray, reference_point: Optional[Tuple[float, float]] = None
     ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         """
         Detects primary face, aligns and crops it, and extracts the 128-D feature embedding.
@@ -69,8 +70,31 @@ class FaceEngine:
         if faces is None or len(faces) == 0:
             return None
 
-        # Choose the highest confidence face (sorted descending by confidence at index 14)
-        best_face = sorted(faces, key=lambda f: float(f[14]), reverse=True)[0]
+        # In crowded crops the highest-confidence face may belong to a neighbour.
+        # Live verification must select the face containing this person's nose.
+        candidates = faces
+        if reference_point is not None:
+            px, py = reference_point
+            candidates = [face for face in faces
+                          if face[0] - face[2] * .15 <= px <= face[0] + face[2] * 1.15
+                          and face[1] - face[3] * .15 <= py <= face[1] + face[3] * 1.15]
+            if not candidates:
+                return None
+            def distance_to_nose(face):
+                # YuNet columns 8/9 are the detected nose landmark. Use the box
+                # centre only if that landmark is unavailable/outside its face.
+                nose_x, nose_y = float(face[8]), float(face[9])
+                if not (face[0] <= nose_x <= face[0] + face[2]
+                        and face[1] <= nose_y <= face[1] + face[3]):
+                    nose_x, nose_y = face[0] + face[2] * .5, face[1] + face[3] * .5
+                return float(np.hypot((nose_x - px) / max(1, face[2]),
+                                      (nose_y - py) / max(1, face[3])))
+            candidates = sorted(candidates, key=distance_to_nose)
+            if len(candidates) > 1 and distance_to_nose(candidates[1]) - distance_to_nose(candidates[0]) < .10:
+                return None
+            best_face = candidates[0]
+        else:
+            best_face = max(candidates, key=lambda f: float(f[14]))
         if float(best_face[14]) < self.score_threshold:
             return None
 
@@ -101,7 +125,7 @@ class FaceEngine:
 
         # OpenCV SFace matcher using cosine similarity
         sim = self.recognizer.match(e1, e2, cv2.FaceRecognizerSF_FR_COSINE)
-        return float(sim)
+        return max(-1.0, min(1.0, float(sim)))
 
     def verify_match(
         self, emb1: np.ndarray, emb2: np.ndarray, threshold: Optional[float] = None

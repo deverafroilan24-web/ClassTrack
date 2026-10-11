@@ -2,6 +2,11 @@
 setlocal
 cd /d "%~dp0"
 
+:: Both source applications use the local dashboard started by this launcher.
+set "WEB_DASHBOARD_URL=http://127.0.0.1:8000"
+set "DATABASE_MODE=sqlite"
+set "CAMERA_FOLLOW_DASHBOARD=1"
+
 :: Check if running from inside an unextracted zip
 echo "%~dp0" | findstr /i "Temp" >nul
 if not errorlevel 1 (
