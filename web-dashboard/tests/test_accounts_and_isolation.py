@@ -61,11 +61,13 @@ def test_admin_crud_password_reset_and_revocation(school):
 def test_password_storage_and_legacy_routes(school):
     client, db, admin, one, two = school
     with db._connect() as conn:
-        rows = conn.execute('SELECT pin, pin_hash, password_hash FROM teachers').fetchall()
+        rows = conn.execute('SELECT is_admin, pin, pin_hash, password_hash FROM teachers').fetchall()
         admins = conn.execute('SELECT password_hash FROM "Admin"').fetchall()
     assert all(r['pin'] is None and r['pin_hash'] is None for r in rows)
-    assert all(r['password_hash'].startswith('pbkdf2_sha256$600000$') for r in rows)
-    assert len({r['password_hash'] for r in [*rows, *admins]}) == 3  # independent salts
+    assert all(r['password_hash'] is None if r['is_admin'] else
+               r['password_hash'].startswith('pbkdf2_sha256$600000$') for r in rows)
+    stored_hashes = [r['password_hash'] for r in rows if r['password_hash']] + [r['password_hash'] for r in admins]
+    assert len(set(stored_hashes)) == 4  # independent salts for two teachers and two admins
     assert PASSWORD not in client.get('/api/admin/teachers', headers=admin).text
     assert client.get('/api/auth/teacher-keys').status_code in (401, 404)
     assert client.post('/api/auth/verify-pin', json={'pin': '1234'}).status_code in (401, 404)
@@ -74,11 +76,11 @@ def test_password_storage_and_legacy_routes(school):
 
 def test_admin_table_email_reset_and_validation(school):
     client, db, admin, one, two = school
-    account = db.save_admin('Admin1', 'New-admin-password-2026', 'admin1@example.com')
-    assert account['email'] == 'admin1@example.com'
+    account = db.save_admin('School-Admin', 'New-admin-password-2026', 'school-admin@example.com', account_id='secondary_admin')
+    assert account['email'] == 'school-admin@example.com'
     assert 'password_hash' not in account
-    assert client.get('/api/admin/teachers', headers=admin).status_code == 401
-    login = client.post('/api/auth/login', json={'login_id': 'admin1', 'password': 'New-admin-password-2026'})
+    assert client.get('/api/admin/teachers', headers=admin).status_code == 200
+    login = client.post('/api/auth/login', json={'login_id': 'School-Admin', 'password': 'New-admin-password-2026'})
     assert login.status_code == 200
     assert login.json()['is_admin'] is True
     assert client.get('/api/admin/teachers', headers={'X-Teacher-Token': login.json()['token']}).status_code == 200
@@ -88,7 +90,7 @@ def test_admin_table_email_reset_and_validation(school):
         assert stored.startswith('pbkdf2_sha256$600000$')
         assert 'New-admin-password-2026' not in stored
     with pytest.raises(ValueError):
-        db.save_admin('Admin1', PASSWORD, 'invalid-email')
+        db.save_admin('School-Admin', PASSWORD, 'invalid-email', account_id='secondary_admin')
     with pytest.raises(ValueError):
         db.save_admin('Admin1', 'pass', 'admin1@example.com')
     with pytest.raises(ValueError):
@@ -103,6 +105,9 @@ def test_admin_table_migrates_legacy_credentials_once(tmp_path):
     db = DatabaseManager(path)
     password_hash = hash_password(PASSWORD)
     with db._connect() as conn:
+        # A real pre-migration database has no automatically provisioned local
+        # admin row yet; remove the test fixture's seed before restoring legacy data.
+        conn.execute('DELETE FROM "Admin" WHERE id = ?', ('local_default_admin',))
         conn.execute("DELETE FROM app_settings WHERE key = 'admin_table_v1'")
         conn.execute('''INSERT INTO teachers
             (id, name, login_id, password_hash, is_admin, is_active, auth_version, created_at)

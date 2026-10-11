@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 runtime_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 load_dotenv(runtime_dir / ".env")
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 # Remote Web Dashboard URL (where gesture events are sent)
 WEB_DASHBOARD_URL = os.getenv("WEB_DASHBOARD_URL", "https://classtrack-mm41.onrender.com")

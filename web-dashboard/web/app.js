@@ -745,6 +745,10 @@ async function syncCameraSection(sectionId) {
       const data = await response.json().catch(() => ({}));
       throw new Error(apiError(data, "Camera section sync failed"));
     }
+    const data = await response.json().catch(() => ({}));
+    if (data.unassigned_cameras > 0) {
+      showToast(`${data.unassigned_cameras} camera(s) remain unassigned. For automatic following, connect a single unassigned camera or assign each camera to a section.`, "warning", 6000);
+    }
   } catch (error) {
     console.warn("Could not sync selected section to Camera Node:", error);
   }
@@ -2834,7 +2838,10 @@ function handleSocketMessage(msg) {
         renderSectionRoster();
         renderRecitationLedger();
       }
-      if (role === "teacher") fetchSeats();
+      if (role === "teacher") {
+        if (currentSectionId) syncCameraSection(currentSectionId);
+        fetchSeats();
+      }
       fetchRecitationLedger();
       if (role === "teacher") fetchSessionsHistory();
       break;

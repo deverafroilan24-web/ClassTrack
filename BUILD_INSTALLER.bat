@@ -63,12 +63,19 @@ if errorlevel 1 (
     echo [ERROR] Could not add the private runtime configuration to the installer build.
     exit /b 1
 )
+"%PYTHON_EXE%" desktop-app\prepare_installer_env.py "%TEMP_BUILD%\dist\ClassTrack\.env"
+if errorlevel 1 (
+    echo [ERROR] Could not configure the installer camera to follow its teacher dashboard.
+    exit /b 1
+)
 
 :: 4. Locate Inno Setup Compiler (ISCC.exe)
 echo.
 echo [3/3] Compiling standalone Windows Setup Wizard with Inno Setup...
 set "ISCC_EXE="
+if exist "%LOCALAPPDATA%\Programs\Inno Setup 7\ISCC.exe" set "ISCC_EXE=%LOCALAPPDATA%\Programs\Inno Setup 7\ISCC.exe"
 if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set "ISCC_EXE=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+if exist "C:\Program Files\Inno Setup 7\ISCC.exe" set "ISCC_EXE=C:\Program Files\Inno Setup 7\ISCC.exe"
 if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" set "ISCC_EXE=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 if exist "C:\Program Files\Inno Setup 6\ISCC.exe" set "ISCC_EXE=C:\Program Files\Inno Setup 6\ISCC.exe"
 
@@ -95,7 +102,7 @@ if errorlevel 1 (
 echo.
 echo ============================================================
 echo   SUCCESS! Standalone Installer Generated:
-echo   dist\installer\ClassTrack_Setup_v1.0.exe
+    echo   dist\installer\ClassTrack_Setup_v1.0.2.exe
 echo ============================================================
 echo.
 pause

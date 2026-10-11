@@ -21,6 +21,14 @@ def live_class(tmp_path, monkeypatch):
     database = DatabaseManager(str(tmp_path / "classtrack-test.db"))
     monkeypatch.setattr(dashboard, "db", database)
     dashboard.edge_selected_section_id = None
+    dashboard.edge_selected_sections.clear()
+    dashboard.edge_camera_teacher_ids.clear()
+    dashboard.edge_camera_node_ids.clear()
+    dashboard.edge_camera_id_owners.clear()
+    dashboard.edge_dashboard_followers.clear()
+    dashboard.edge_unassigned_followers.clear()
+    dashboard.edge_subscribers.clear()
+    dashboard.edge_sections.clear()
     dashboard.queues.clear()
     teacher = database.create_teacher("Test teacher", "", "TEACHER", "Test-password-2026", account_id="teacher_master")
     section = database.create_section("Test class", "Testing", "Room 1", teacher_id="teacher_master")
@@ -232,7 +240,7 @@ def test_manual_point_button_has_server_action(live_class):
 
 def test_websocket_uses_same_validation_and_ack(live_class):
     client, database, section, seat, token, session = live_class
-    with client.websocket_connect("/ws/edge", headers={"X-Edge-Key": "test-edge-key"}) as socket:
+    with client.websocket_connect(f"/ws/edge?section_id={section['id']}", headers={"X-Edge-Key": "test-edge-key"}) as socket:
         assert socket.receive_json()["type"] == "EDGE_INIT"
         socket.send_json({"type": "GESTURE_EVENT", "payload": event(section, seat, session, "ws-raise")})
         ack = socket.receive_json()
@@ -274,7 +282,7 @@ def test_camera_receives_enrolled_face_data(live_class):
 
 def test_student_registration_notifies_connected_camera(live_class):
     client, database, section, seat, token, session = live_class
-    with client.websocket_connect("/ws/edge", headers={"X-Edge-Key": "test-edge-key"}) as socket:
+    with client.websocket_connect(f"/ws/edge?section_id={section['id']}", headers={"X-Edge-Key": "test-edge-key"}) as socket:
         assert socket.receive_json()["type"] == "EDGE_INIT"
         registered = client.post(
             f"/api/sections/{section['id']}/students",
@@ -301,21 +309,17 @@ def test_camera_can_load_selected_roster_before_session(live_class):
     assert response.json()[0]["student_id"] == student_id
 
 
-def test_teacher_section_selection_notifies_camera_nodes(live_class, monkeypatch):
+def test_teacher_section_selection_binds_following_camera(live_class):
     client, database, section, student, token, session = live_class
-    messages = []
-
-    async def capture(message):
-        messages.append(message)
-
-    monkeypatch.setattr(dashboard.ConnectionManager, "broadcast_to_edge", capture)
-    response = client.post(
-        "/api/edge/section",
-        json={"section_id": section["id"]},
-        headers={"X-Teacher-Token": token},
-    )
-    assert response.status_code == 200
-    assert messages == [{"type": "SECTION_SELECTED", "section_id": section["id"]}]
-    with client.websocket_connect("/ws/edge", headers={"X-Edge-Key": "test-edge-key"}) as socket:
+    with client.websocket_connect("/ws/edge?follow_dashboard=1&camera_id=" + "b" * 32) as socket:
         init = socket.receive_json()
-        assert init["selected_section_id"] == section["id"]
+        assert init["selected_section_id"] is None
+        response = client.post(
+            "/api/edge/section",
+            json={"section_id": section["id"]},
+            headers={"X-Teacher-Token": token},
+        )
+        assert response.status_code == 200
+        assert response.json()["connected_nodes"] == 1
+        context = socket.receive_json()
+        assert context["selected_section_id"] == section["id"]

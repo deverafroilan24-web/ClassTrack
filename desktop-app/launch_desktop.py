@@ -551,7 +551,7 @@ def main():
     configured_follow = os.getenv('CAMERA_FOLLOW_DASHBOARD', '').lower()
     parser.add_argument('--follow-dashboard', action=argparse.BooleanOptionalAction,
                         default=None if not configured_follow else configured_follow in {'1', 'true', 'yes'},
-                        help='Follow the localhost teacher dashboard; explicit section IDs pin a classroom')
+                        help='Follow the assigned teacher dashboard; explicit section IDs pin a classroom')
     parser.add_argument("--confidence", type=float, default=DETECTION_CONFIDENCE, help="Detection confidence")
     args = parser.parse_args()
 

@@ -2,7 +2,7 @@
 ; Inno Setup 6 Script
 
 #define MyAppName "ClassTrack Camera Node"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "ClassTrack"
 #define MyAppExeName "ClassTrack.exe"
 
@@ -19,7 +19,7 @@ DefaultDirName={localappdata}\Programs\ClassTrack
 DefaultGroupName=ClassTrack
 DisableProgramGroupPage=yes
 OutputDir=..\dist\installer
-OutputBaseFilename=ClassTrack_Setup_v1.0
+OutputBaseFilename=ClassTrack_Setup_v1.0.2
 SetupIconFile=assets\app_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/fast

@@ -12,6 +12,7 @@ from urllib.parse import urlparse, urlencode
 import queue
 import threading
 import time
+import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
@@ -31,6 +32,7 @@ class DashboardAPIClient:
     ):
         self.section_id = section_id
         self.base_url = base_url.rstrip("/")
+        self.camera_id = uuid.uuid4().hex
         self.follow_dashboard = (urlparse(base_url).hostname in {"localhost", "127.0.0.1", "::1"}
                                  and not section_id) if follow_dashboard is None else follow_dashboard
         self._context_supported: Optional[bool] = None
@@ -145,7 +147,8 @@ class DashboardAPIClient:
         if self._context_supported is False:
             return False, None
         counter = self._context_update_counter
-        params = {"follow_dashboard": "true" if self.follow_dashboard else "false"}
+        params = {"follow_dashboard": "true" if self.follow_dashboard else "false",
+                  "camera_id": self.camera_id}
         if self.section_id:
             params['section_id'] = self.section_id
         try:
@@ -322,6 +325,7 @@ class DashboardAPIClient:
                     params['section_id'] = self.section_id
                 if self.follow_dashboard:
                     params['follow_dashboard'] = '1'
+                params['camera_id'] = self.camera_id
                 ws.connect(ws_url + ("?" + urlencode(params) if params else ""), timeout=5)
                 with self._ws_lock:
                     self._ws = ws

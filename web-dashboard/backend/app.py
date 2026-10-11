@@ -76,7 +76,12 @@ event_tokens: Dict[WebSocket, str] = {}
 edge_sections: Dict[WebSocket, Optional[str]] = {}
 edge_subscribers: Set[WebSocket] = set()
 edge_selected_section_id: Optional[str] = None
+edge_selected_sections: Dict[str, str] = {}
+edge_camera_teacher_ids: Dict[WebSocket, Optional[str]] = {}
+edge_camera_node_ids: Dict[WebSocket, str] = {}
+edge_camera_id_owners: Dict[str, Optional[str]] = {}
 edge_dashboard_followers: Set[WebSocket] = set()
+edge_unassigned_followers: Set[WebSocket] = set()
 edge_context_revision = 0
 edge_context_generation = uuid.uuid4().hex
 
@@ -85,20 +90,13 @@ def _local_camera(request) -> bool:
     return bool(request.client and request.client.host in {"127.0.0.1", "::1", "localhost"})
 
 
-def _camera_context(section_id=None, follow_dashboard=False):
+def _camera_context(section_id=None, follow_dashboard=False, teacher_id=None):
     """One coherent selection/session/owner snapshot for camera synchronization."""
     revision = edge_context_revision
-    selected = edge_selected_section_id if follow_dashboard else section_id
-    if not selected:
-        live = [s for s in db.get_sessions() if not s.get('ended_at')]
-        if len(live) == 1:
-            selected = live[0]['section_id']
-        else:
-            all_sections = db.get_sections()
-            if len(all_sections) == 1:
-                selected = all_sections[0]['id']
-    owner = db.get_section_owner(selected) if selected else None
-    if not owner:
+    owner = teacher_id or (db.get_section_owner(section_id) if section_id else None)
+    selected = (edge_selected_sections.get(owner, section_id) if follow_dashboard and owner
+                else section_id)
+    if selected and db.get_section_owner(selected) != owner:
         selected = None
     context = {
         'type': 'EDGE_INIT', 'event_ingest_version': 2, 'camera_binding_version': 2,
@@ -109,24 +107,72 @@ def _camera_context(section_id=None, follow_dashboard=False):
         'camera_settings': teacher_camera_settings.get(owner, camera_settings),
     }
     if revision != edge_context_revision:
-        return _camera_context(section_id, follow_dashboard)
+        return _camera_context(section_id, follow_dashboard, owner)
     return context
 
 
-async def _bind_dashboard_cameras(section_id):
-    # Only automatic cameras on this dashboard's local machine follow browser
-    # control. Explicit classroom bindings keep multi-camera sessions isolated.
-    followers = list(edge_dashboard_followers & edge_subscribers)
+def _active_selected_teacher():
+    """Return a teacher only when one connected teacher dashboard can claim a new camera."""
+    connected = set(event_teacher_ids.values())
+    candidates = connected.intersection(edge_selected_sections)
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+async def _send_camera_context(ws, section_id, teacher_id):
+    context = await run_in_threadpool(_camera_context, section_id, True, teacher_id)
+    edge_sections[ws] = context['selected_section_id']
+    try:
+        await ws.send_text(json.dumps(context))
+    except Exception:
+        edge_subscribers.discard(ws)
+        edge_dashboard_followers.discard(ws)
+        edge_unassigned_followers.discard(ws)
+        edge_camera_teacher_ids.pop(ws, None)
+        node_id = edge_camera_node_ids.pop(ws, None)
+        if node_id:
+            edge_camera_id_owners.pop(node_id, None)
+        edge_sections.pop(ws, None)
+
+
+async def _bind_dashboard_cameras(section_id, teacher_id):
+    # An unbound cloud camera may be claimed only when it is the single pending
+    # follower. Once claimed, only that teacher's section changes reach it.
+    followers = [ws for ws in edge_dashboard_followers & edge_subscribers
+                 if edge_camera_teacher_ids.get(ws) == teacher_id]
+    if not followers and len(edge_unassigned_followers & edge_subscribers) == 1:
+        ws = next(iter(edge_unassigned_followers & edge_subscribers))
+        if not any(edge_camera_teacher_ids.get(other) == teacher_id for other in edge_dashboard_followers):
+            edge_unassigned_followers.discard(ws)
+            edge_camera_teacher_ids[ws] = teacher_id
+            node_id = edge_camera_node_ids.get(ws)
+            if node_id:
+                edge_camera_id_owners[node_id] = teacher_id
+            edge_dashboard_followers.add(ws)
+            followers = [ws]
     if not followers:
-        return
-    context = await run_in_threadpool(_camera_context, section_id, True)
+        return 0
     for ws in followers:
-        edge_sections[ws] = context['selected_section_id']
+        await _send_camera_context(ws, section_id, teacher_id)
+    return len(followers)
+
+
+async def _broadcast_to_teacher_cameras(teacher_id, message):
+    encoded = json.dumps(message)
+    target_section = message.get('section_id')
+    for ws in list(edge_subscribers):
+        if edge_camera_teacher_ids.get(ws) != teacher_id:
+            continue
+        if target_section and edge_sections.get(ws) != target_section:
+            continue
         try:
-            await ws.send_text(json.dumps(context))
+            await ws.send_text(encoded)
         except Exception:
             edge_subscribers.discard(ws)
             edge_dashboard_followers.discard(ws)
+            edge_camera_teacher_ids.pop(ws, None)
+            node_id = edge_camera_node_ids.pop(ws, None)
+            if node_id:
+                edge_camera_id_owners.pop(node_id, None)
             edge_sections.pop(ws, None)
 
 
@@ -552,7 +598,8 @@ async def deactivate_teacher(teacher_id: str, x_teacher_token: Optional[str] = H
         raise HTTPException(status_code=404, detail="Teacher account not found")
     if active:
         queues.pop(active['id'], None)
-        await ConnectionManager.broadcast_to_edge({'type': 'SESSION_STOPPED', 'section_id': active['section_id'], 'session_id': active['id']})
+        await _broadcast_to_teacher_cameras(teacher_id, {
+            'type': 'SESSION_STOPPED', 'section_id': active['section_id'], 'session_id': active['id']})
     await ConnectionManager.broadcast_event({'type': 'ACCOUNT_UPDATED', 'teacher_id': teacher_id})
     return {"deleted": True, "teacher_id": teacher_id}
 
@@ -568,7 +615,8 @@ async def edit_teacher(teacher_id: str, body: TeacherUpdateRequest, x_teacher_to
         ended = db.stop_session(teacher_id=teacher_id)
         if ended:
             queues.pop(ended['id'], None)
-            await ConnectionManager.broadcast_to_edge({'type': 'SESSION_STOPPED', 'section_id': ended['section_id'], 'session_id': ended['id']})
+            await _broadcast_to_teacher_cameras(teacher_id, {
+                'type': 'SESSION_STOPPED', 'section_id': ended['section_id'], 'session_id': ended['id']})
     await ConnectionManager.broadcast_event({'type': 'ACCOUNT_UPDATED', 'teacher_id': teacher_id})
     return result
 
@@ -630,7 +678,7 @@ def get_sections(x_teacher_token: Optional[str] = Header(default=None),
     if section_id:
         owner = db.get_section_owner(section_id)
         return db.get_sections(teacher_id=owner) if owner else []
-    return db.get_sections()
+    return []
 
 
 @app.post("/api/edge/section")
@@ -641,24 +689,34 @@ async def select_camera_section(body: EdgeSectionSelectRequest,
     active = db.get_active_session(teacher_id=_teacher_id_from_token(x_teacher_token))
     if active and active.get("section_id") != body.section_id:
         raise HTTPException(status_code=409, detail="End the active session before changing the camera section")
+    teacher_id = _teacher_id_from_token(x_teacher_token)
     global edge_selected_section_id, edge_context_revision
     edge_selected_section_id = body.section_id
+    edge_selected_sections[teacher_id] = body.section_id
     edge_context_revision += 1
-    await _bind_dashboard_cameras(body.section_id)
-    # Unbound nodes may adopt a section only when the deployment is unambiguous.
-    if len(db.get_sections()) == 1:
-        for ws in edge_subscribers:
-            if not edge_sections.get(ws):
-                edge_sections[ws] = body.section_id
-    await ConnectionManager.broadcast_to_edge({"type": "SECTION_SELECTED", "section_id": body.section_id,
-                                               "context_generation": edge_context_generation,
-                                               "selection_revision": edge_context_revision})
-    return {"status": "ok", "section_id": body.section_id}
+    camera_count = await _bind_dashboard_cameras(body.section_id, teacher_id)
+    await _broadcast_to_teacher_cameras(teacher_id, {
+        "type": "SECTION_SELECTED", "section_id": body.section_id,
+        "context_generation": edge_context_generation,
+        "selection_revision": edge_context_revision,
+    })
+    return {
+        "status": "ok", "section_id": body.section_id, "connected_nodes": camera_count,
+        "unassigned_cameras": len(edge_unassigned_followers & edge_subscribers),
+    }
 
 
 @app.get('/api/edge/context')
-def get_camera_context(request: Request, section_id: Optional[str] = None, follow_dashboard: bool = False):
-    return _camera_context(section_id, follow_dashboard and _local_camera(request))
+def get_camera_context(request: Request, section_id: Optional[str] = None, follow_dashboard: bool = False,
+                       camera_id: Optional[str] = None):
+    # Camera identity for cloud followers is established by the WebSocket claim
+    # flow. A stateless remote GET cannot safely infer which teacher owns a node.
+    if not _local_camera(request):
+        owner = edge_camera_id_owners.get(camera_id) if camera_id else None
+        if follow_dashboard:
+            return _camera_context(None, True, owner) if owner else _camera_context(None, False)
+        return _camera_context(section_id, False, owner)
+    return _camera_context(section_id, follow_dashboard)
 
 
 @app.post("/api/sections", response_model=SectionResponse, status_code=status.HTTP_201_CREATED)
@@ -1014,8 +1072,7 @@ async def get_active_session(x_teacher_token: Optional[str] = Header(default=Non
         return _guest_session(x_guest_token)
     if section_id:
         return db.get_active_session(section_id=section_id)
-    active = [s for s in db.get_sessions() if not s.get("ended_at")]
-    return active[0] if len(active) == 1 else None
+    return None
 
 
 @app.get("/api/sessions/active/guest-access")
@@ -1071,21 +1128,15 @@ async def start_session(body: SessionStartRequest, x_teacher_token: Optional[str
     sess = db.start_session(title=body.title, section_id=body.section_id)
     global edge_selected_section_id, edge_context_revision
     edge_selected_section_id = body.section_id
+    edge_selected_sections[teacher_id] = body.section_id
     edge_context_revision += 1
-    # An unbound camera can follow a single running classroom without a key or
-    # manual section selection. Bound cameras never switch to another class.
-    live_sessions = [s for s in db.get_sessions() if not s.get("ended_at")]
-    if len(live_sessions) == 1:
-        for ws in edge_subscribers:
-            if not edge_sections.get(ws):
-                edge_sections[ws] = body.section_id
     # Clear podium queue for fresh session
     session_queue(sess["id"]).clear()
-    await _bind_dashboard_cameras(body.section_id)
+    await _bind_dashboard_cameras(body.section_id, teacher_id)
     ledger = db.get_recitation_ledger(session_id=sess["id"], section_id=body.section_id, active_session_required=True)
     await ConnectionManager.broadcast_event({"type": "SESSION_STARTED", "payload": sess, "ledger": ledger})
     # Notify connected Camera Nodes
-    await ConnectionManager.broadcast_to_edge({
+    await _broadcast_to_teacher_cameras(teacher_id, {
         "type": "SESSION_STARTED",
         "session_id": sess["id"],
         "section_id": body.section_id,
@@ -1103,14 +1154,16 @@ async def stop_session(x_teacher_token: Optional[str] = Header(default=None)):
         global edge_context_revision
         edge_context_revision += 1
         queues.pop(sess["id"], None)
-        if sess['section_id'] == edge_selected_section_id:
-            await _bind_dashboard_cameras(sess['section_id'])
+        if edge_selected_sections.get(teacher_id) == sess['section_id']:
+            await _bind_dashboard_cameras(sess['section_id'], teacher_id)
     empty_ledger = []
     if sess:
         await ConnectionManager.broadcast_event({"type": "SESSION_STOPPED", "payload": sess, "ledger": empty_ledger})
-        await ConnectionManager.broadcast_to_edge({"type": "SESSION_STOPPED", "section_id": sess["section_id"], "session_id": sess["id"],
-                                                   "context_generation": edge_context_generation,
-                                                   "selection_revision": edge_context_revision})
+        await _broadcast_to_teacher_cameras(teacher_id, {
+            "type": "SESSION_STOPPED", "section_id": sess["section_id"], "session_id": sess["id"],
+            "context_generation": edge_context_generation,
+            "selection_revision": edge_context_revision,
+        })
     return sess
 
 
@@ -1571,16 +1624,59 @@ async def ws_edge(websocket: WebSocket):
     await websocket.accept()
     edge_subscribers.add(websocket)
     selected = websocket.query_params.get("section_id")
-    follow_dashboard = websocket.query_params.get('follow_dashboard') == '1' and _local_camera(websocket)
-    sections = db.get_sections()
-    if selected and not follow_dashboard and not any(section['id'] == selected for section in sections):
+    follow_dashboard = websocket.query_params.get('follow_dashboard') == '1'
+    node_id = websocket.query_params.get('camera_id', '')
+    if node_id and (len(node_id) > 64 or any(ch not in '0123456789abcdef' for ch in node_id.lower())
+                    or node_id in edge_camera_id_owners):
         edge_subscribers.discard(websocket)
         await websocket.close(code=1008)
         return
-    context = _camera_context(selected, follow_dashboard)
-    selected = context['selected_section_id']
+    if node_id:
+        edge_camera_node_ids[websocket] = node_id
+    owner = db.get_section_owner(selected) if selected else None
+    if selected and not owner:
+        edge_subscribers.discard(websocket)
+        edge_camera_node_ids.pop(websocket, None)
+        await websocket.close(code=1008)
+        return
+
     if follow_dashboard:
-        edge_dashboard_followers.add(websocket)
+        if owner:
+            if any(edge_camera_teacher_ids.get(ws) == owner for ws in edge_dashboard_followers & edge_subscribers):
+                edge_subscribers.discard(websocket)
+                edge_camera_node_ids.pop(websocket, None)
+                await websocket.close(code=1013)
+                return
+            edge_dashboard_followers.add(websocket)
+            edge_camera_teacher_ids[websocket] = owner
+            if node_id:
+                edge_camera_id_owners[node_id] = owner
+        else:
+            # If exactly one teacher has an active dashboard and class selection,
+            # a camera reconnect can safely recover its teacher binding.
+            teacher_id = _active_selected_teacher()
+            existing = any(edge_camera_teacher_ids.get(ws) == teacher_id
+                           for ws in edge_dashboard_followers & edge_subscribers) if teacher_id else False
+            if teacher_id and not existing:
+                owner = teacher_id
+                selected = edge_selected_sections[teacher_id]
+                edge_dashboard_followers.add(websocket)
+                edge_camera_teacher_ids[websocket] = owner
+                if node_id:
+                    edge_camera_id_owners[node_id] = owner
+            else:
+                edge_unassigned_followers.add(websocket)
+                edge_camera_teacher_ids[websocket] = None
+                if node_id:
+                    edge_camera_id_owners[node_id] = None
+    else:
+        edge_camera_teacher_ids[websocket] = owner
+        if node_id:
+            edge_camera_id_owners[node_id] = owner
+
+    context = (_camera_context(selected, True, owner) if follow_dashboard and owner
+               else _camera_context(None if follow_dashboard else selected, follow_dashboard, owner))
+    selected = context['selected_section_id']
     edge_sections[websocket] = selected
     print(f"[Edge] Camera Node connected. Total nodes: {len(edge_subscribers)}")
     try:
@@ -1599,12 +1695,21 @@ async def ws_edge(websocket: WebSocket):
 
                 if msg_type == 'SELECT_SECTION':
                     selected = msg.get('section_id')
-                    if msg.get('follow_dashboard') is True and _local_camera(websocket):
-                        edge_dashboard_followers.add(websocket)
-                        context = _camera_context(None, True)
+                    if msg.get('follow_dashboard') is True:
+                        selected_owner = db.get_section_owner(selected) if selected else None
+                        bound_owner = edge_camera_teacher_ids.get(websocket)
+                        if selected_owner and selected_owner == bound_owner:
+                            edge_selected_sections[bound_owner] = selected
+                            context = _camera_context(selected, True, bound_owner)
+                        elif not selected and not bound_owner:
+                            context = _camera_context(None, True)
+                        else:
+                            continue
                     elif db.get_section_owner(selected):
                         edge_dashboard_followers.discard(websocket)
-                        context = _camera_context(selected)
+                        edge_unassigned_followers.discard(websocket)
+                        edge_camera_teacher_ids[websocket] = db.get_section_owner(selected)
+                        context = _camera_context(selected, False, edge_camera_teacher_ids[websocket])
                     else:
                         continue
                     edge_sections[websocket] = context['selected_section_id']
@@ -1633,6 +1738,11 @@ async def ws_edge(websocket: WebSocket):
     finally:
         edge_subscribers.discard(websocket)
         edge_dashboard_followers.discard(websocket)
+        edge_unassigned_followers.discard(websocket)
+        edge_camera_teacher_ids.pop(websocket, None)
+        node_id = edge_camera_node_ids.pop(websocket, None)
+        if node_id:
+            edge_camera_id_owners.pop(node_id, None)
         edge_sections.pop(websocket, None)
 
 

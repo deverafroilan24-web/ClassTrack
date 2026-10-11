@@ -38,7 +38,7 @@ if not exist "%PYTHON%" (
         echo.
         echo NOTE FOR NON-TECH USERS:
         echo You do NOT need Python if you run the standalone installer:
-        echo Double-click: ClassTrack_Setup_v1.0.exe
+        echo Double-click: ClassTrack_Setup_v1.0.2.exe
         echo ============================================================
         pause
         exit /b 1

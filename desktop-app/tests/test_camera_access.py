@@ -53,6 +53,17 @@ def test_shortcut_uses_config_next_to_packaged_executable(monkeypatch, tmp_path)
     load.assert_called_once_with(tmp_path / '.env')
 
 
+def test_installer_runtime_config_enables_teacher_follow_and_drops_legacy_key(tmp_path):
+    from prepare_installer_env import enable_dashboard_follow
+
+    runtime_env = tmp_path / '.env'
+    runtime_env.write_text('WEB_DASHBOARD_URL=https://dashboard.example\nEDGE_API_KEY=legacy\n', encoding='utf-8')
+    enable_dashboard_follow(runtime_env)
+    settings = runtime_env.read_text(encoding='utf-8')
+    assert 'CAMERA_FOLLOW_DASHBOARD=true' in settings
+    assert 'EDGE_API_KEY' not in settings
+
+
 def test_closed_socket_disconnects_without_an_empty_receive_loop(monkeypatch):
     import websocket
     socket = Mock()
